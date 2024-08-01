@@ -33,9 +33,10 @@ def main():
     avg_norm_base = 0
     avg_norm_mean = 0
     avg_norm_meb = 0
-    avg_norm_lb = 0
+    # avg_norm_lb = 0
+    avg_norm_spec = 0
     for _ in tqdm(range(args.num_iters)):
-        ps = gen.uniform(0, 1, size=(m, n))**3
+        ps = 1 - gen.uniform(0, 1, size=(m, n))**4
         mats = gen.uniform(0, 1, size=(T, m, n))
         #mats = (mats > ps).astype(int)
         proj_mat = np.eye(m) - 1 / m**2 * np.ones(m) @ np.ones(m).T
@@ -44,17 +45,20 @@ def main():
         transpose = np.swapaxes(reduced_mats, 1, 2)
         am = arithmetic_mean(transpose).T
         fmeb = frobenius_meb(transpose).T
-        lb = strict_lb(mats)
+        # lb = strict_lb(mats)
+        smeb = spectral_meb(reduced_mats, num_iters=300, debug=False)
 
         avg_norm_base += spectral_norm(reduced_mats) / args.num_iters
         avg_norm_mean += spectral_norm(reduced_mats - am) / args.num_iters
         avg_norm_meb += spectral_norm(reduced_mats - fmeb) / args.num_iters
-        avg_norm_lb += spectral_norm(proj_mat @ (mats - lb)) / args.num_iters
+        # avg_norm_lb += spectral_norm(proj_mat @ (mats - lb)) / args.num_iters
+        avg_norm_spec += spectral_norm(reduced_mats - smeb) / args.num_iters
 
-    print(avg_norm_base)
-    print(avg_norm_mean)
-    print(avg_norm_meb)
-    print(avg_norm_lb)
+    print("Base:", avg_norm_base)
+    print("AM:", avg_norm_mean)
+    print("FMEB:", avg_norm_meb)
+    # print(avg_norm_lb)
+    print("SMEB:", avg_norm_spec)
 
     # bases = get_bases(mats)
     # basis = grassmann_common_subspace(bases)
@@ -123,6 +127,38 @@ def grassmann_distance(basis1, basis2):
     _, S, _ = np.linalg.svd(basis1.T @ basis2)
     pr_angles = np.arccos(np.clip(S, 0, 1))
     return np.sqrt(np.sum(pr_angles**2))
+
+
+def spectral_meb(mats, num_iters=100, debug=False):
+    """
+    subgradient-based algorithm for exactly solving the spectral meb
+    """
+    x = arithmetic_mean(mats)  # initial guess
+    best_x = np.copy(x)
+    best_val = spectral_norm(mats - x)
+
+    if debug:
+        print("INIT:")
+        print(best_val)
+
+    for t in range(num_iters):
+        step_size = 1 / np.sqrt(t + 1)
+
+        U, D, V = np.linalg.svd(mats - x, full_matrices=False)
+        ixs = np.argwhere(np.isclose(np.abs(D), np.max(np.abs(D))))
+        for i, j in ixs:
+            x += step_size * np.sign(D[i][j]) * np.outer(
+                U[i, :, j], V[i, j, :])
+
+        val = spectral_norm(mats - x)
+        if val < best_val:
+            best_val = val
+            np.copyto(best_x, x)
+        if debug:
+            print(f"ITERATION {t+1}:")
+            print(val)
+
+    return best_x
 
 
 if __name__ == "__main__":
