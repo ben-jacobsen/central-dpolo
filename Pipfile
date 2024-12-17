@@ -10,6 +10,7 @@ seaborn = "*"
 miniballcpp = "*"
 scikit-learn = "*"
 tqdm = "*"
+mpmath = "*"
 
 [dev-packages]
 
