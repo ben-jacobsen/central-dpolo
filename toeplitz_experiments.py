@@ -9,10 +9,12 @@ from functools import cache
 from itertools import pairwise
 
 import matplotlib.pyplot as plt
+import mpmath as mp
 import numpy as np
 import pandas as pd
 import scipy.linalg as la
 import seaborn as sns
+from numpy.fft import *
 from scipy.sparse.linalg import svds
 
 
@@ -22,77 +24,92 @@ def main():
     args = parser.parse_args()
     T = args.T
     q = 1 / 100
-    s = 0.01
+    s = 0.05
+    alpha = 0.999
 
-    A = la.toeplitz(np.ones(T), np.zeros(T))
+    # A = la.toeplitz(np.ones(T), np.zeros(T))
 
     strategies = {
         #'geometric': lambda k: q**(k - 1),
-        #'1/n': lambda k: 1 / k,
+        # '1/sqrt(n)': lambda k: 1 / np.sqrt(k*np.pi),
         # '1/(sqrt(n) log(n))': lambda k: 1 / (np.sqrt(k) * np.log(k + 1)),
-        'log_decay': lambda k: 1 / (np.sqrt(
-            (k + 1) * np.log(k + np.e)**(1 + s))),
+        # 'log_decay': lambda k: 1 / (np.sqrt(
+        #     (k) * np.log(k + np.e - 1)**(1 + s))),
         # 'offset 3': lambda k: 1 / (np.sqrt((k + 3) * np.log(k + 3)**1.01)),
         # 'offset 5': lambda k: 1 / (np.sqrt((k + 5) * np.log(k + 5)**1.01)),
-        #'decaying optimal': lambda k: opt(k) / np.sqrt(np.log(k + 3))
+        # 'decaying optimal': lambda k: opt(k) / np.power(np.log(k + np.e - 1), 1/2),
         # 'geom_perturbation': lambda k: opt(k) - q * opt(k - 1),
-        'fourier': fourier,
+        # 'fourier2': fourier2,
+        # 'fourier': fourier,
         'optimal': opt,
+        # 'opt_geom': lambda k: opt(k) * alpha**(k-1),
+        # 'opt_shifted': lambda k: opt(k, 1/2+s)
+        'dirichlet': lambda k: opt(k) / k
     }
+
+    print(f"opt_shifted sensitivity bound: {2**(s+1/2)*(s+1/2)/(np.pi*s)}")
+    print(f"opt_shifted lower bound: {2**(s)*(s+1/2)/(np.pi*s)}")
 
     cols = {}
 
     # geometric
-    fig, axs = plt.subplots(3, layout='constrained')
-    axs[0].set_title("Sensitivity")
-    axs[1].set_title("Variance")
-    axs[2].set_title("Coefficients")
-    axs[2].set_yscale('log')
-    for ax in axs:
+    fig, axs = plt.subplots(2,2, layout='constrained')
+    axs[0,0].set_title("Sensitivity")
+    axs[1,0].set_title("Standard Error")
+    axs[0,1].set_title("Total Variance")
+    axs[1,1].set_title("Coefficients")
+    axs[1,1].set_yscale('log')
+    for ax in axs.reshape(-1):
         ax.set_xscale('log')
+    axs[0,0].sharey(axs[1,0])
+
+    steps = np.arange(1,T+1)
     for name, f in strategies.items():
         print('-' * 80)
         print(name)
         print('-' * 80)
         try:
-            r = f(np.arange(1, T + 1))
+            r = f(steps)
         except TypeError:
-            r = [f(k) for k in np.arange(1, T + 1)]
+            r = np.array([f(k) for k in steps])
 
         sensitivity = np.sqrt(np.cumsum(np.power(r, 2)))
         max_sens = sensitivity[-1]
+        print(f"Sensitivity: {max_sens}")
 
-        R = la.toeplitz(r, np.zeros_like(r)) / max_sens
+        #R = la.toeplitz(r, np.zeros_like(r)) # / max_sens
         # L = A @ la.inv(R)
-        R_inv = la.solve_toeplitz((R.T[:, 0], R.T[0, :]), np.eye(T)).T
-        L = A @ R_inv
+        # R_inv = la.solve_toeplitz((R.T[:, 0], R.T[0, :]), np.eye(T)).T
+        #L = A @ R_inv
+        r_inv = fast_inv_ltt(r)
+        l = np.cumsum(r_inv)
 
-        cols[name] = R[:, 0]
-        cols[name + "_inverse"] = R_inv[:, 0]
+        cols[name] = r
+        cols[name + "_inverse"] = r_inv
 
         #print(error_estimation(R))
-        # print(L)
-        # print(R)
-        variance = np.sum(np.power(L, 2), axis=1)
+        se = np.sqrt(np.cumsum(np.power(l, 2)))
 
-        print(variance[-1])
+        print(l[:10])
+        print(r[:10])
 
-        L_est = r * (np.log(np.arange(2, T + 2))**(1.01 / 2))
-        mid = (L[0, 0] + R[0, 0]) / 2
+        print(se[-1])
 
-        sns.lineplot(sensitivity / max_sens, ax=axs[0], label=name)
-        sns.lineplot(variance, ax=axs[1], label=name)
-        sns.lineplot(R[:, 0] / R[0, 0] * mid, ax=axs[2], label=name + " (R)")
-        sns.lineplot(L[:, 0] / L[0, 0] * mid,
-                     ax=axs[2],
+        # L_est = r * (np.log(np.arange(2, T + 2))**(1.01 / 2))
+        mid = (l[0] + r[0]) / 2
+        view = np.arange(1, min(T+1, 1001))
+        if T > 1000:
+            res = T // 1000
+            view = np.concatenate((view, np.arange(1001, T+1, res)), axis=None)
+
+        sns.lineplot(x=steps[view], y=sensitivity[view], ax=axs[0,0], label=name)
+        sns.lineplot(x=steps[view], y=se[view], ax=axs[1,0], label=name)
+        sns.lineplot(x=steps[view], y=sensitivity[view] * se[view], ax=axs[0,1], label=name)
+        sns.lineplot(x=steps[view], y=r[view]/r[0] * mid, ax=axs[1,1], label=name + " (R)")
+        sns.lineplot(x=steps[view], y=l[view]/l[0] * mid,
+                     ax=axs[1,1],
                      label=name + " (L)",
                      ls=':')
-        # if name == 'offset 1':
-        #     sns.lineplot(L_est / L_est[0] * mid,
-        #                  ax=axs[2],
-        #                  label="Log speculation",
-        #                  ls=':',
-        #                  color='black')
     plt.legend()
     plt.show()
 
@@ -119,19 +136,45 @@ def main():
 
 
 @cache
-def opt(k):
+def opt(k, alpha=1/2):
     k = int(k)
     if k < 1:
         return 0
     if k == 1:
         return 1
-    return (1 - 1 / (2 * k - 2)) * opt(k - 1)
+    return (1 - alpha/(k - 1)) * opt(k - 1, alpha)
 
 
-@cache
 def fourier(k):
-    return 1 / (2 * np.sqrt(k) * np.log(k + np.e - 1)) - np.sqrt(k) / (
+    v = 1 / (2 * np.sqrt(k) * np.log(k + np.e - 1)) - np.sqrt(k) / (
         (k + np.e - 1) * np.power(np.log(k + np.e - 1), 2))
+    return v/v[0]
+
+
+def fourier2(k):
+    k = np.append(k, k[-1] + 1)
+    vec = np.sqrt(k)/np.log(k+np.e-1)
+    d = np.diff(vec)
+    return d/d[0]
+
+
+def back_to_front(k):
+    T = len(k)
+    vec = np.sqrt(2 * np.log(k+np.e-1) / k)
+    L_inv = la.solve_toeplitz((vec, np.zeros_like(vec)), np.eye(T))
+    return np.cumsum(L_inv[:,0])
+
+
+def back_to_front2(k):
+    T = len(k)
+    vec = 1/(2*np.power(k+1, 3/2)) * (1/np.sqrt(np.log(k+1)) - np.sqrt(np.log(k+1)))
+    vec /= vec[0]
+    R = la.solve_toeplitz((vec, np.zeros_like(vec)), np.eye(T))
+    print(k)
+    print(vec)
+    print(R)
+    return R[:,0]
+
 
 
 @cache
@@ -146,8 +189,11 @@ def error_estimation(mat):
     return 1 / s[0]
 
 
-def inv_ltt(coeffs):
-    inv_coeffs = [1 / coeffs[0]]
+def fast_inv_ltt(a):
+    n = len(a)
+    eps = 10**(-5/n)
+    vec = np.power(eps, np.arange(n))
+    return (ifft(1/fft(a * vec)) / vec).real
 
 
 if __name__ == "__main__":
