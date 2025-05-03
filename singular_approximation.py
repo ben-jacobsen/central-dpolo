@@ -10,6 +10,7 @@
 """
 
 import argparse
+from functools import cache
 from math import factorial, isclose
 
 import matplotlib.pyplot as plt
@@ -17,7 +18,7 @@ import mpmath as mp
 import numpy as np
 import seaborn as sns
 import sympy as sym
-from scipy.signal import fftconvolve
+from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
 
@@ -26,7 +27,7 @@ def main():
     parser.add_argument('-T', type=int, default=100)
     parser.add_argument('--gamma', type=float, default=-0.55)
     parser.add_argument('-K', type=int, default=1)
-    parser.add_argument('--delta', type=float, default=1)
+    parser.add_argument('--delta', type=float, default=0)
     args = parser.parse_args()
 
     mp.prec = 53
@@ -39,10 +40,12 @@ def main():
     coeffs = {
         # 'Function Values':
         # [singular_function(z, gamma) for z in np.linspace(-1e-14, 1e-14, 11)],
-        'Direct Estimation':
-        np.array(direct_estimation(T, gamma, delta=delta), dtype=float),
+        # 'Direct Estimation':
+        # np.array(direct_estimation(T, gamma, delta=delta), dtype=float),
         'Asymptotic Expansion':
         np.array(asymptotic_expansion(T, gamma, delta=delta), dtype=float),
+        'Exact Convolution':
+        exact_convolution(T + 1, gamma),
         # f'Order {K} Expansion':
         # np.array(full_computation(T, gamma, K), dtype=float),
         # 'Combined':
@@ -61,9 +64,10 @@ def main():
 
     for k, v in coeffs.items():
         pretty_print(v, k)
+        print(f"\tRatio: {(coeffs[k] / coeffs['Exact Convolution'])[-1]}")
         sns.lineplot(v, label=k)
 
-    # pretty_print(coeffs[f'Order {K} Expansion'] / coeffs['Direct Estimation'],
+    # pretty_print(coeffs[f'Order {K} Expansion'] / coeffs['Exact Convolution'],
     #              'Asymptotic Ratio')
 
     plt.yscale('log')
@@ -80,6 +84,137 @@ def pretty_print(xs, label):
     print('#' * r + ' ' + label + ' ' + '#' * r)
     print('#' * (80 - l % 2))
     print(xs)
+
+
+def exact_convolution(T, gamma, alpha=-1 / 2, delta=0):
+    """
+    Uses recurrence formulas to derive the exact Taylor coefficients of each
+    component of the singular function separately, and then computes their
+    Cauchy product in O(T log T) time and O(T) space with FFTs
+
+    Returns a sequence of size T, i.e. all coefficients up to x^(T-1)
+    """
+    if isinstance(T, np.ndarray):
+        T = len(T)
+
+    poly_part = poly_coeffs(T - 1, alpha)
+    log_part = log_coeffs(T - 1)
+
+    if delta == 0:
+        return convolve(poly_part,
+                        power_coeffs_explicit(log_part, gamma),
+                        mode='full')[:T]
+    else:
+        loglog_part = loglog_coeffs(T - 1)
+        return convolve(convolve(poly_part,
+                                 power_coeffs_explicit(log_part, gamma),
+                                 mode='full')[:T],
+                        power_coeffs_explicit(loglog_part, delta),
+                        mode='full')[:T]
+
+
+@cache
+def poly_coeffs(n, alpha=-1 / 2):
+    """
+    Returns the first n+1 coefficients in the Taylor expansion of
+        f(x) = (1-x)^alpha
+    """
+    return np.array([poly_coeff_single(k, alpha) for k in range(n + 1)])
+
+
+@cache
+def poly_coeff_single(n, alpha=-1 / 2):
+    """
+    Recursively computes the coefficient of x^n in the Taylor expansion of
+        f(x) = (1-x)^alpha
+    """
+    if n == 0:
+        return 1
+    return (1 + alpha / n) * poly_coeff_single(n - 1, alpha)
+
+
+@cache
+def log_coeffs(n):
+    """
+    Returns the first n+1 coefficients in the Taylor expansion of
+        f(x) = (1/x) ln(1/(1-x))
+    """
+    return 1 / np.arange(1, n + 2)
+
+
+@cache
+def loglog_coeffs(n):
+    """
+    Returns the first n+1 coefficients in the Taylor expansion of
+        g(x) = 2 * (1/x) ln( f(x) )
+
+    where
+        f(x) = (1/x) ln(1/(1-x))
+
+    Uses the fact that:
+
+        d/dx (x g(x)) = 2 f'(x) / f(x)
+        (x g(x))(0) = 0
+
+    to reduce problem to series inversion + convolution + term-by-term
+        differentiation and integration
+    """
+    f_coeffs = log_coeffs(n + 1)
+    f_prime_coeffs = f_coeffs[1:] * np.arange(1, n + 2)
+    rf_coeffs = power_coeffs_explicit(f_coeffs, -1)
+
+    xg_prime_coeffs = 2 * convolve(f_prime_coeffs, rf_coeffs)[:n + 1]
+    # integrate both sides, then divide by x
+    g_coeffs = xg_prime_coeffs / np.arange(1, n + 2)
+
+    return g_coeffs
+
+
+def binary_components(k):
+    bin_str = bin(k)[2:]
+    comps = []
+    for i, b in enumerate(bin_str[::-1]):
+        if b == '1':
+            comps.append(i)
+    return comps
+
+
+def power_coeffs_explicit(a_coeffs, p):
+    """
+    Given:
+        a_coeffs: a sequence of n+1 real numbers, the first non-zero, 
+            interpreted as Taylor coefficients of some function f(x), 
+        p: any real or complex number
+
+    Computes and returns the first n+1 Taylor coefficients of the function
+        f(x)^p using the recurrence relation presented in:
+        https://www.jstor.org/stable/2318904?seq=1
+    """
+    if p == 1:
+        return a_coeffs
+
+    a_coeffs = np.array(a_coeffs)
+    n = len(a_coeffs) - 1
+    a0 = a_coeffs[0]
+
+    b_coeffs = np.zeros(n + 1)
+    b_coeffs[0] = a0**p
+
+    conv_array = np.zeros(n)
+
+    for i in range(1, n + 1):
+        conv_array[:i] = a_coeffs[1:i + 1] * b_coeffs[i - 1::-1]
+        s1 = (p + 1) * np.dot(np.arange(1, i + 1), conv_array[:i])
+        # conv_array[:i])
+        s2 = i * np.sum(conv_array[:i])
+
+        # s1 = (p + 1) * convolve(np.arange(1, i + 1) * a_coeffs[1:i + 1],
+        #                         b_coeffs[:i],
+        #                         mode='valid')[0]
+        # s2 = i * convolve(a_coeffs[1:i + 1], b_coeffs[:i], mode='valid')[0]
+        b_coeffs[i] = (1 / (i * a0)) * (s1 - s2)
+
+    return b_coeffs
 
 
 def l(x):
@@ -225,6 +360,27 @@ def combined_estimate(T, gamma, alpha=-1 / 2, delta=0, tol=1e-2):
         print(f"\tRelative Error: {manual[t] / coeff[t]:.3f}")
         coeff[:t + 1] = manual
         return coeff
+
+
+def perron_estimate(ts, alpha):
+    """
+    Using Perron's formula and several slightly-heuristic approximations to
+    directly compute what the sum of square entries for the left matrix
+    should be through a single integral evaluation
+    """
+    estimates = {}
+    for t in ts:
+        integrand = lambda x: t * mp.power(1 + x**2, -(
+            1 + alpha) / 2) * mp.cos((1 + alpha) * x - mp.tan(x) * mp.log(t))
+        zeros = lambda n: ((n + 10) - mp.pi / 2) * mp.pi / mp.log(t)
+        estimates[f"{t}"] = mp.quadosc(
+            integrand,
+            [0, mp.inf],
+            zeros=zeros,
+        )
+        estimates[f"{t} (conjecture)"] = mp.pi * mp.power(
+            mp.log(t), (1 + alpha) / 2)
+    return estimates
 
 
 if __name__ == "__main__":

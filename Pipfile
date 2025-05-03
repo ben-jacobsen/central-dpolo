@@ -11,6 +11,9 @@ miniballcpp = "*"
 scikit-learn = "*"
 tqdm = "*"
 mpmath = "*"
+scipy = "*"
+pyqt6 = "*"
+sympy = "*"
 
 [dev-packages]
 

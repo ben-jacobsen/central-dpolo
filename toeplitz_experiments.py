@@ -46,20 +46,27 @@ def main():
         opt,
         # 'opt_geom': lambda k: opt(k) * alpha**(k-1),
         # 'opt_shifted': lambda k: opt(k, 1/2+s)
-        'log_decay':
-        lambda k: opt(k) * np.maximum(1, np.log(np.log(4 * k - 3))) / np.power(
-            np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s),
-        f'singular approx (gamma={-1/2-s})':
-        lambda k: sa.combined_estimate(k, -1 / 2 - s, delta=0, tol=0.01),
+        # 'log_decay':
+        # lambda k: opt(k) / np.power(np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s
+        #                             ),
+        # 'log_decay_loglog_offset':
+        # lambda k: opt(k) * np.maximum(1, np.log(np.log(4 * k - 3))) / np.power(
+        #     np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s),
+        f'singular (gamma={-1/2-s}, delta=0)':
+        lambda k: sa.exact_convolution(k, -1 / 2 - s),
         # f'loglog approx (gamma={-1/2-s}, delta=-gamma)':
         # lambda k: sa.combined_estimate(
         #     k, -1 / 2 - s, delta=1 / 2 + s, tol=0.01),
-        f'loglog approx (gamma={-1/2-s}, delta=1)':
-        lambda k: sa.combined_estimate(k, -1 / 2 - s, delta=1, tol=0.01),
+        f'singular (gamma={-1/2-s}, delta={3*s/2})':
+        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=3 * s / 2),
+        f'singular (gamma={-1/2-s}, delta={1/2 + s})':
+        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=1 / 2 + s),
+        f'singular (gamma={-1/2-s}, delta=1)':
+        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=1),
     }
 
-    print(f"opt_shifted sensitivity bound: {2**(s+1/2)*(s+1/2)/(np.pi*s)}")
-    print(f"opt_shifted lower bound: {2**(s)*(s+1/2)/(np.pi*s)}")
+    # print(f"opt_shifted sensitivity bound: {2**(s+1/2)*(s+1/2)/(np.pi*s)}")
+    # print(f"opt_shifted lower bound: {2**(s)*(s+1/2)/(np.pi*s)}")
 
     cols = {}
 
@@ -67,11 +74,12 @@ def main():
     fig, axs = plt.subplots(2, 2, layout='constrained')
     axs[0, 0].set_title("Sensitivity")
     axs[1, 0].set_title("Standard Error")
-    axs[0, 1].set_title("Total Variance")
+    axs[0, 1].set_title("Est. Real Variance")
     axs[1, 1].set_title("Coefficients")
     axs[1, 1].set_yscale('log')
     for ax in axs.reshape(-1):
         ax.set_xscale('log')
+        # ax.set_yscale('linear')
     axs[0, 0].sharey(axs[1, 0])
 
     steps = np.arange(1, T + 1)
@@ -118,10 +126,11 @@ def main():
                      ax=axs[0, 0],
                      label=name)
         sns.lineplot(x=steps[view], y=se[view], ax=axs[1, 0], label=name)
-        sns.lineplot(x=steps[view],
-                     y=sensitivity[view] * se[view],
-                     ax=axs[0, 1],
-                     label=name)
+        sns.lineplot(
+            x=steps[view],
+            y=sensitivity[view] * se[-1],  # se[view],
+            ax=axs[0, 1],
+            label=name)
         sns.lineplot(x=steps[view],
                      y=r[view] / r[0] * mid,
                      ax=axs[1, 1],
@@ -131,6 +140,12 @@ def main():
                      ax=axs[1, 1],
                      label=name + " (L)",
                      ls=':')
+
+    sns.lineplot(x=steps[view],
+                 y=np.sqrt(1 + np.pow(np.log(steps[view]), 2 + 2 * s) /
+                           (2 + 2 * s) / np.pi),
+                 ax=axs[1, 0],
+                 label=f"Expected SE (gamma={-1/2-s})")
     plt.legend()
     plt.show()
 
