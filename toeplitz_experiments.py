@@ -17,6 +17,7 @@ import seaborn as sns
 from numpy.fft import *
 from scipy.sparse.linalg import svds
 
+import sequences as seq
 import singular_approximation as sa
 
 
@@ -30,42 +31,51 @@ def main():
 
     # A = la.toeplitz(np.ones(T), np.zeros(T))
 
-    delta = float(sa.optimize_sensitivity(-1 / 2, -1 / 2 - s))
-    strategies = {
-        #'geometric': lambda k: q**(k - 1),
-        # '1/sqrt(n)': lambda k: 1 / np.sqrt(k*np.pi),
-        # '1/(sqrt(n) log(n))': lambda k: 1 / (np.sqrt(k) * np.log(k + 1)),
-        # 'log_decay': lambda k: 1 / (np.sqrt(
-        #     (k) * np.log(k + np.e - 1)**(1 + s))),
-        # 'offset 3': lambda k: 1 / (np.sqrt((k + 3) * np.log(k + 3)**1.01)),
-        # 'offset 5': lambda k: 1 / (np.sqrt((k + 5) * np.log(k + 5)**1.01)),
-        # 'decaying optimal': lambda k: opt(k) / np.power(np.log(k + np.e - 1), 1/2),
-        # 'geom_perturbation': lambda k: opt(k) - q * opt(k - 1),
-        # 'fourier2': fourier2,
-        # 'fourier': fourier,
-        'optimal':
-        opt,
-        # 'opt_geom': lambda k: opt(k) * alpha**(k-1),
-        # 'opt_shifted': lambda k: opt(k, 1/2+s)
-        # 'log_decay':
-        # lambda k: opt(k) / np.power(np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s
-        #                             ),
-        # 'log_decay_loglog_offset':
-        # lambda k: opt(k) * np.maximum(1, np.log(np.log(4 * k - 3))) / np.power(
-        #     np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s),
-        f'singular (gamma={-1/2-s}, delta=0)':
-        lambda k: sa.exact_convolution(k, -1 / 2 - s),
-        # f'loglog approx (gamma={-1/2-s}, delta=-gamma)':
-        # lambda k: sa.combined_estimate(
-        #     k, -1 / 2 - s, delta=1 / 2 + s, tol=0.01),
-        f'singular (gamma={-1/2-s}, opt delta={delta:.4f})':
-        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=delta),
-    }
+    # delta = float(sa.optimize_sensitivity(-1 / 2, -1 / 2 - s))
+
+    strategies = [
+        seq.Opt(T),
+        seq.DoublingTrick(100, seq.DoublingTrick.optimal_ratio(), T)
+    ]
+
+    for gap in np.linspace(0.05, 0.5, 10):
+        strategies.append(seq.Anytime(-1 / 2, -1 / 2 - gap, 3 * gap / 2))
+
+    #strategies = {
+    #    #'geometric': lambda k: q**(k - 1),
+    #    # '1/sqrt(n)': lambda k: 1 / np.sqrt(k*np.pi),
+    #    # '1/(sqrt(n) log(n))': lambda k: 1 / (np.sqrt(k) * np.log(k + 1)),
+    #    # 'log_decay': lambda k: 1 / (np.sqrt(
+    #    #     (k) * np.log(k + np.e - 1)**(1 + s))),
+    #    # 'offset 3': lambda k: 1 / (np.sqrt((k + 3) * np.log(k + 3)**1.01)),
+    #    # 'offset 5': lambda k: 1 / (np.sqrt((k + 5) * np.log(k + 5)**1.01)),
+    #    # 'decaying optimal': lambda k: opt(k) / np.power(np.log(k + np.e - 1), 1/2),
+    #    # 'geom_perturbation': lambda k: opt(k) - q * opt(k - 1),
+    #    # 'fourier2': fourier2,
+    #    # 'fourier': fourier,
+    #    'optimal':
+    #    opt,
+    #    # 'opt_geom': lambda k: opt(k) * alpha**(k-1),
+    #    # 'opt_shifted': lambda k: opt(k, 1/2+s)
+    #    # 'log_decay':
+    #    # lambda k: opt(k) / np.power(np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s
+    #    #                             ),
+    #    # 'log_decay_loglog_offset':
+    #    # lambda k: opt(k) * np.maximum(1, np.log(np.log(4 * k - 3))) / np.power(
+    #    #     np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s),
+    #    f'singular (gamma={-1/2-s}, delta=0)':
+    #    lambda k: sa.exact_convolution(k, -1 / 2 - s),
+    #    # f'loglog approx (gamma={-1/2-s}, delta=-gamma)':
+    #    # lambda k: sa.combined_estimate(
+    #    #     k, -1 / 2 - s, delta=1 / 2 + s, tol=0.01),
+    #    f'singular (gamma={-1/2-s}, opt delta={delta:.4f})':
+    #    lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=delta),
+    #}
 
     # print(f"opt_shifted sensitivity bound: {2**(s+1/2)*(s+1/2)/(np.pi*s)}")
     # print(f"opt_shifted lower bound: {2**(s)*(s+1/2)/(np.pi*s)}")
 
-    cols = {}
+    # cols = {}
 
     # geometric
     fig, axs = plt.subplots(2, 2, layout='constrained')
@@ -80,63 +90,51 @@ def main():
     axs[0, 0].sharey(axs[1, 0])
 
     steps = np.arange(1, T + 1)
-    for name, f in strategies.items():
+    view = np.arange(1, min(T, 1000))
+    if T > 1000:
+        res = T // 1000
+        view = np.concatenate((view, np.arange(1000, T, res)), axis=None)
+
+    for strategy in strategies:
         print('-' * 80)
-        print(name)
+        print(strategy.name)
         print('-' * 80)
-        try:
-            r = f(steps)
-        except TypeError:
-            r = np.array([f(k) for k in steps])
+        if isinstance(strategy, seq.Sequence):
+            sensitivity = strategy.sensitivity()
+            l = strategy.first_k_left(T)
+            r = strategy.first_k(T)
+            mid = (l[0] + r[0]) / 2
+            print(f"Sensitivity: {sensitivity}")
+            print(l[:10])
+            print(r[:10])
+            se = strategy.standard_error(T)
+            print(se[-1])
 
-        sensitivity = np.sqrt(np.cumsum(np.power(r, 2)))
-        max_sens = sensitivity[-1]
-        print(f"Sensitivity: {max_sens}")
+            sns.lineplot(x=steps[view],
+                         y=strategy.smooth_sensitivity()[view],
+                         ax=axs[0, 0],
+                         label=strategy.name)
+            sns.lineplot(x=steps[view],
+                         y=se[view],
+                         ax=axs[1, 0],
+                         label=strategy.name)
 
-        #R = la.toeplitz(r, np.zeros_like(r)) # / max_sens
-        # L = A @ la.inv(R)
-        # R_inv = la.solve_toeplitz((R.T[:, 0], R.T[0, :]), np.eye(T)).T
-        #L = A @ R_inv
-        r_inv = fast_inv_ltt(r)
-        l = np.cumsum(r_inv)
+            # sns.lineplot(x=steps[view],
+            #              y=r[view] / r[0] * mid,
+            #              ax=axs[1, 1],
+            #              label=strategy.name + " (R)")
+            # sns.lineplot(x=steps[view],
+            #              y=l[view] / l[0] * mid,
+            #              ax=axs[1, 1],
+            #              label=strategy.name + " (L)",
+            #              ls=':')
 
-        cols[name] = r
-        cols[name + "_inverse"] = r_inv
-
-        #print(error_estimation(R))
-        se = np.sqrt(np.cumsum(np.power(l, 2)))
-
-        print(l[:10])
-        print(r[:10])
-
-        print(se[-1])
-
-        # L_est = r * (np.log(np.arange(2, T + 2))**(1.01 / 2))
-        mid = (l[0] + r[0]) / 2
-        view = np.arange(1, min(T, 1000))
-        if T > 1000:
-            res = T // 1000
-            view = np.concatenate((view, np.arange(1000, T, res)), axis=None)
-
-        sns.lineplot(x=steps[view],
-                     y=sensitivity[view],
-                     ax=axs[0, 0],
-                     label=name)
-        sns.lineplot(x=steps[view], y=se[view], ax=axs[1, 0], label=name)
+        print(strategy.noise_schedule(T)[view])
         sns.lineplot(
             x=steps[view],
-            y=sensitivity[view] * se[-1],  # se[view],
+            y=strategy.noise_schedule(T)[view],  # se[view],
             ax=axs[0, 1],
-            label=name)
-        sns.lineplot(x=steps[view],
-                     y=r[view] / r[0] * mid,
-                     ax=axs[1, 1],
-                     label=name + " (R)")
-        sns.lineplot(x=steps[view],
-                     y=l[view] / l[0] * mid,
-                     ax=axs[1, 1],
-                     label=name + " (L)",
-                     ls=':')
+            label=strategy.name)
 
     sns.lineplot(x=steps[view],
                  y=np.sqrt(1 + np.pow(np.log(steps[view]), 2 + 2 * s) /
