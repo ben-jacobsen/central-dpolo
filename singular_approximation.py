@@ -362,25 +362,61 @@ def combined_estimate(T, gamma, alpha=-1 / 2, delta=0, tol=1e-2):
         return coeff
 
 
-def perron_estimate(ts, alpha):
+def f1(w):
+    return (2 * mp.cos(w))**2
+
+
+def f2(w):
+    return (1 / 4) * mp.log(f1(w))**2 + w**2
+
+
+def f3(w):
+    return (1 / 4) * mp.log(f2(w))**2
+
+
+def f4(w):
+    if w >= mp.pi / 2:
+        return 0
+    return (mp.atan2(w, -mp.log(2 * mp.cos(w))) +
+            mp.atan2(-mp.sin(2 * w), -mp.cos(2 * w)))**2
+
+
+def sens_function(alpha, gamma, delta):
     """
-    Using Perron's formula and several slightly-heuristic approximations to
-    directly compute what the sum of square entries for the left matrix
-    should be through a single integral evaluation
+    Using Parseval's theorem, we can evaluate the infinite sum 
+    corresponding to the squared Taylor coefficients of our singular function
+    by integration. This returns the integrand for the interval 0 to pi/2. 
     """
-    estimates = {}
-    for t in ts:
-        integrand = lambda x: t * mp.power(1 + x**2, -(
-            1 + alpha) / 2) * mp.cos((1 + alpha) * x - mp.tan(x) * mp.log(t))
-        zeros = lambda n: ((n + 10) - mp.pi / 2) * mp.pi / mp.log(t)
-        estimates[f"{t}"] = mp.quadosc(
-            integrand,
-            [0, mp.inf],
-            zeros=zeros,
-        )
-        estimates[f"{t} (conjecture)"] = mp.pi * mp.power(
-            mp.log(t), (1 + alpha) / 2)
-    return estimates
+    return lambda w: 4 * f1(w)**alpha * f2(w)**gamma * (f3(w) + f4(w))**delta
+
+
+def compute_sensitivity(alpha, gamma, delta):
+    """
+    Actually integrate the function from above
+    """
+    return mp.quad(sens_function(alpha, gamma, delta),
+                   [0, mp.pi / 3, mp.pi / 2])
+
+
+def optimize_sensitivity(alpha, gamma):
+    """
+    What is the optimal value of delta for fixed alpha and gamma?
+    """
+
+    def weight(w):
+        return mp.log(f3(w) + f4(w))
+
+    def g1(delta):
+        return mp.quad(
+            lambda w: sens_function(alpha, gamma, delta)(w) * weight(w),
+            [0, mp.pi / 3])
+
+    def g2(delta):
+        return mp.quad(
+            lambda w: sens_function(alpha, gamma, delta)(w) * weight(w),
+            [mp.pi / 3, mp.pi / 2])
+
+    return mp.findroot(lambda delta: g1(delta) + g2(delta), 0, verbose=True)
 
 
 if __name__ == "__main__":

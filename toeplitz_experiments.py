@@ -30,6 +30,7 @@ def main():
 
     # A = la.toeplitz(np.ones(T), np.zeros(T))
 
+    delta = float(sa.optimize_sensitivity(-1 / 2, -1 / 2 - s))
     strategies = {
         #'geometric': lambda k: q**(k - 1),
         # '1/sqrt(n)': lambda k: 1 / np.sqrt(k*np.pi),
@@ -57,12 +58,8 @@ def main():
         # f'loglog approx (gamma={-1/2-s}, delta=-gamma)':
         # lambda k: sa.combined_estimate(
         #     k, -1 / 2 - s, delta=1 / 2 + s, tol=0.01),
-        f'singular (gamma={-1/2-s}, delta={3*s/2})':
-        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=3 * s / 2),
-        f'singular (gamma={-1/2-s}, delta={1/2 + s})':
-        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=1 / 2 + s),
-        f'singular (gamma={-1/2-s}, delta=1)':
-        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=1),
+        f'singular (gamma={-1/2-s}, opt delta={delta:.4f})':
+        lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=delta),
     }
 
     # print(f"opt_shifted sensitivity bound: {2**(s+1/2)*(s+1/2)/(np.pi*s)}")
