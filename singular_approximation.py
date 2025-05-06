@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import mpmath as mp
 import numpy as np
 import seaborn as sns
-import sympy as sym
+# import sympy as sym
 from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
