@@ -24,7 +24,7 @@ import singular_approximation as sa
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-T', default=100, type=int)
-    parser.add_argument('-s', default=0.05, type=float)
+    parser.add_argument('-s', default=0.01, type=float)
     args = parser.parse_args()
     T = args.T
     s = args.s
@@ -35,49 +35,16 @@ def main():
 
     strategies = [
         seq.Opt(T),
-        seq.DoublingTrick(100, seq.DoublingTrick.optimal_ratio(), T)
     ]
 
-    for gap in np.linspace(0.05, 0.5, 10):
-        strategies.append(seq.Anytime(-1 / 2, -1 / 2 - gap, 3 * gap / 2))
+    for delta in np.linspace(0, (1 / 2 + s) * 6 / 5, 4):
+        gamma = -1 / 2 - s
+        strategies.append(
+            seq.Anytime(-1 / 2, gamma, delta, tol=1e-4, asym_order=4))
 
-    #strategies = {
-    #    #'geometric': lambda k: q**(k - 1),
-    #    # '1/sqrt(n)': lambda k: 1 / np.sqrt(k*np.pi),
-    #    # '1/(sqrt(n) log(n))': lambda k: 1 / (np.sqrt(k) * np.log(k + 1)),
-    #    # 'log_decay': lambda k: 1 / (np.sqrt(
-    #    #     (k) * np.log(k + np.e - 1)**(1 + s))),
-    #    # 'offset 3': lambda k: 1 / (np.sqrt((k + 3) * np.log(k + 3)**1.01)),
-    #    # 'offset 5': lambda k: 1 / (np.sqrt((k + 5) * np.log(k + 5)**1.01)),
-    #    # 'decaying optimal': lambda k: opt(k) / np.power(np.log(k + np.e - 1), 1/2),
-    #    # 'geom_perturbation': lambda k: opt(k) - q * opt(k - 1),
-    #    # 'fourier2': fourier2,
-    #    # 'fourier': fourier,
-    #    'optimal':
-    #    opt,
-    #    # 'opt_geom': lambda k: opt(k) * alpha**(k-1),
-    #    # 'opt_shifted': lambda k: opt(k, 1/2+s)
-    #    # 'log_decay':
-    #    # lambda k: opt(k) / np.power(np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s
-    #    #                             ),
-    #    # 'log_decay_loglog_offset':
-    #    # lambda k: opt(k) * np.maximum(1, np.log(np.log(4 * k - 3))) / np.power(
-    #    #     np.maximum(1, np.log(4 * k - 3)), 1 / 2 + s),
-    #    f'singular (gamma={-1/2-s}, delta=0)':
-    #    lambda k: sa.exact_convolution(k, -1 / 2 - s),
-    #    # f'loglog approx (gamma={-1/2-s}, delta=-gamma)':
-    #    # lambda k: sa.combined_estimate(
-    #    #     k, -1 / 2 - s, delta=1 / 2 + s, tol=0.01),
-    #    f'singular (gamma={-1/2-s}, opt delta={delta:.4f})':
-    #    lambda k: sa.exact_convolution(k, -1 / 2 - s, delta=delta),
-    #}
+    # strategies.append(
+    #     seq.DoublingTrick(T // 2, seq.DoublingTrick.optimal_ratio(), T))
 
-    # print(f"opt_shifted sensitivity bound: {2**(s+1/2)*(s+1/2)/(np.pi*s)}")
-    # print(f"opt_shifted lower bound: {2**(s)*(s+1/2)/(np.pi*s)}")
-
-    # cols = {}
-
-    # geometric
     fig, axs = plt.subplots(2, 2, layout='constrained')
     axs[0, 0].set_title("Sensitivity")
     axs[1, 0].set_title("Standard Error")
@@ -95,7 +62,7 @@ def main():
         res = T // 1000
         view = np.concatenate((view, np.arange(1000, T, res)), axis=None)
 
-    for strategy in strategies:
+    for strategy, color in zip(strategies, sns.color_palette()):
         print('-' * 80)
         print(strategy.name)
         print('-' * 80)
@@ -113,21 +80,25 @@ def main():
             sns.lineplot(x=steps[view],
                          y=strategy.smooth_sensitivity()[view],
                          ax=axs[0, 0],
-                         label=strategy.name)
+                         label=strategy.name,
+                         color=color)
             sns.lineplot(x=steps[view],
                          y=se[view],
                          ax=axs[1, 0],
-                         label=strategy.name)
+                         label=strategy.name,
+                         color=color)
 
-            # sns.lineplot(x=steps[view],
-            #              y=r[view] / r[0] * mid,
-            #              ax=axs[1, 1],
-            #              label=strategy.name + " (R)")
-            # sns.lineplot(x=steps[view],
-            #              y=l[view] / l[0] * mid,
-            #              ax=axs[1, 1],
-            #              label=strategy.name + " (L)",
-            #              ls=':')
+            sns.lineplot(x=steps[view],
+                         y=r[view] / r[0] * mid,
+                         ax=axs[1, 1],
+                         label=strategy.name + " (R)",
+                         color=color)
+            sns.lineplot(x=steps[view],
+                         y=l[view] / l[0] * mid,
+                         ax=axs[1, 1],
+                         label=strategy.name + " (L)",
+                         ls=':',
+                         color=color)
 
         print(strategy.noise_schedule(T)[view])
         sns.lineplot(
@@ -136,11 +107,11 @@ def main():
             ax=axs[0, 1],
             label=strategy.name)
 
-    sns.lineplot(x=steps[view],
-                 y=np.sqrt(1 + np.pow(np.log(steps[view]), 2 + 2 * s) /
-                           (2 + 2 * s) / np.pi),
-                 ax=axs[1, 0],
-                 label=f"Expected SE (gamma={-1/2-s})")
+    # sns.lineplot(x=steps[view],
+    #              y=np.sqrt(1 + np.pow(np.log(steps[view]), 2 + 2 * s) /
+    #                        (2 + 2 * s) / np.pi),
+    #              ax=axs[1, 0],
+    #              label=f"Expected SE (gamma={-1/2-s})")
     plt.legend()
     plt.show()
 

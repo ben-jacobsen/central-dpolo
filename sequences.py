@@ -9,7 +9,7 @@ from functools import cache
 
 import mpmath as mp
 import numpy as np
-from numpy.fft import *
+from numpy.fft import fft, ifft
 
 import singular_approximation as sa
 
@@ -17,8 +17,8 @@ import singular_approximation as sa
 class Sequence:
 
     def __init__(self):
-        self._seq = np.array([1])
-        self.size = 1
+        self._seq = np.array([])
+        self.size = 0
         self.name = "Mystery Sequence"
 
     def first_k(self, k):
@@ -62,10 +62,12 @@ class Sequence:
             k = self.size
         return np.sqrt(np.cumsum(np.pow(self.first_k(k), 2))).astype(float)
 
-    def noise_schedule(self, k=None):
+    def noise_schedule(self, k=None, smooth=False):
         if k is None:
             k = self.size
 
+        if smooth:
+            return self.smooth_sensitivity(k) * self.standard_error(k)
         return self.sensitivity() * self.standard_error(k)
 
 
@@ -102,12 +104,18 @@ class Opt(Sequence):
 
 class Anytime(Sequence):
 
-    def __init__(self, alpha, gamma, delta):
+    def __init__(self, alpha, gamma, delta=None, tol=0, asym_order=5):
         super().__init__()
 
         self.alpha = alpha
         self.gamma = gamma
-        self.delta = delta
+        self.tol = tol  # threshold to switch to asymptotic expansion
+        self.approximating = False
+        self.asym_order = asym_order
+        if delta is None:
+            self.optimize_delta()
+        else:
+            self.delta = delta
 
         self.name = f"Logarithmic (gamma={gamma:.2f}"
         if delta != 0:
@@ -131,8 +139,38 @@ class Anytime(Sequence):
         return self._left_seq[:k]
 
     def _grow(self, newsize):
-        self._seq = sa.exact_convolution(newsize, self.gamma, self.alpha,
-                                         self.delta)
+        might_approx = self.tol > 0 and not self.approximating
+        while might_approx and newsize > (int_step := min(
+                max(10000, self.size * 2), newsize)):
+            print(
+                f"{newsize} too large compared to {self.size}, trying {int_step} first..."
+            )
+            self._grow(int_step)
+            might_approx = not self.approximating
+
+        # check if we can switch to asymptotics
+        if self.tol > 0 and self.size > 0 and not self.approximating:
+            estimate = sa.full_computation(self.size - 1,
+                                           gamma=self.gamma,
+                                           K=self.asym_order,
+                                           delta=self.delta,
+                                           single_coeff=True)
+            err = abs(estimate[0] - self._seq[self.size - 1])
+            print(f"error: {err}")
+            if err < self.tol:
+                print("Switching to asymptotics")
+                self.approximating = True
+
+        if self.approximating:
+            asymptotic_seq = sa.full_computation(newsize,
+                                                 gamma=self.gamma,
+                                                 K=self.asym_order,
+                                                 delta=self.delta)
+            self._seq = np.concatenate((self._seq, asymptotic_seq[self.size:]))
+        else:
+            self._seq = sa.exact_convolution(newsize, self.gamma, self.alpha,
+                                             self.delta)
+
         self._left_seq = np.cumsum(fast_inv_ltt(self._seq))
         self.size = newsize
 
@@ -143,6 +181,18 @@ class Anytime(Sequence):
     def optimize_delta(self):
         super().__init__()
         self.delta = sa.optimize_sensitivity(self.alpha, self.gamma)
+
+    def estimate_standard_error(self, k):
+        """
+        Use Young's discrete convolution inequality to bound standard error
+        at time t by thinking of the left coefficients as the convolution
+        of the (1-x)^(-1/2) sequence and the coefficients of some logarithmic
+        function
+        """
+        opt_sens = np.sqrt(1 + np.log(4 * np.arange(k) + 1) / np.pi)
+        ratio_seq = Anytime(alpha=0, gamma=-self.gamma, delta=-self.delta)
+
+        return opt_sens * np.cumsum(np.abs(ratio_seq.first_k(k)))
 
 
 class DoublingTrick:

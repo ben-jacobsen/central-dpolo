@@ -10,6 +10,7 @@
 """
 
 import argparse
+import warnings
 from functools import cache
 from math import factorial, isclose
 
@@ -17,7 +18,7 @@ import matplotlib.pyplot as plt
 import mpmath as mp
 import numpy as np
 import seaborn as sns
-# import sympy as sym
+import sympy as sym
 from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
@@ -130,7 +131,7 @@ def poly_coeff_single(n, alpha=-1 / 2):
     """
     if n == 0:
         return 1
-    return (1 + alpha / n) * poly_coeff_single(n - 1, alpha)
+    return (1 - (1 + alpha) / n) * poly_coeff_single(n - 1, alpha)
 
 
 @cache
@@ -243,36 +244,70 @@ def direct_estimation(T, gamma, alpha=-1 / 2, delta=0):
     return np.array([c.real for c in coeffs], dtype=float)
 
 
-def asymptotic_expansion(T, gamma, alpha=-1 / 2, delta=0):
+def asymptotic_expansion(T, gamma, alpha=-1 / 2, delta=0, single_coeff=False):
     """
     This approach directly applies the asymptotic expansion from the ~-transfer
     theorem, disregarding error on lower order terms
     """
     if isinstance(T, np.ndarray):
         T = T.size
-    coeffs = np.ones(T + 1)
-    coeffs[1:] = np.pow(np.arange(1, T + 1),
-                        (-alpha - 1)) / mp.gamma(-alpha) * 2**delta
-    coeffs[2:] *= np.pow(np.log(np.arange(2, T + 1)), gamma)
-    coeffs[3:] *= np.pow(np.log(np.log(np.arange(3, T + 1))), delta)
+
+    if single_coeff:
+        coeffs = np.array([1.0])
+        vals = np.array([T])
+    else:
+        coeffs = np.ones(T + 1).astype(float)
+        vals = np.arange(T + 1)
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        poly_part = np.pow(vals,
+                           (-alpha - 1)) / float(mp.gamma(-alpha)) * 2**delta
+        log_part = np.pow(np.log(vals), gamma)
+        loglog_part = np.pow(np.log(np.log(vals)), delta)
+
+    n1 = np.argmax((poly_part > 0) * np.isfinite(poly_part))
+    n2 = np.argmax((log_part > 0) * np.isfinite(log_part))
+    n3 = np.argmax((loglog_part > 0) * np.isfinite(loglog_part))
+
+    coeffs[n1:] = poly_part[n1:]
+    coeffs[n2:] *= log_part[n2:]
+    coeffs[n3:] *= loglog_part[n3:]
+
+    # coeffs[1:] = np.pow(np.arange(1, T + 1),
+    #                     (-alpha - 1)) / mp.gamma(-alpha) * 2**delta
+    # coeffs[2:] *= np.pow(np.log(np.arange(2, T + 1)), gamma)
+    # coeffs[3:] *= np.pow(np.log(np.log(np.arange(3, T + 1))), delta)
     return np.array(coeffs, dtype=float)
 
 
-def full_computation(T, gamma, K=1, alpha=-1 / 2, delta=0):
+def full_computation(T, gamma, K=1, alpha=-1 / 2, delta=0, single_coeff=False):
     """
     This approaches employs the more complex asymptotic expression which includes
     powers of 1/(log(n)) and constant factors related to derivatives of the
     reciprocal gamma function (which must themselves be estimated numerically).
     The expansion is truncated to terms of order K or less.
     """
-    baseline = asymptotic_expansion(T, gamma, alpha, delta)
-    scale = np.ones(T + 1)
+    baseline = asymptotic_expansion(T,
+                                    gamma,
+                                    alpha,
+                                    delta,
+                                    single_coeff=single_coeff)
+    if single_coeff:
+        scale = np.ones(1)
+        ns = np.array([T])
+    else:
+        scale = np.ones(T + 1)
+        ns = np.arange(T + 1)
     # ignore terms where log(n) < 1
     if K > 0:
         ks = np.arange(1, K + 1)
-        ns = np.arange(3, T + 1)
-        coeffs = expansion_coeff(gamma, ks, ns, alpha=alpha, delta=delta)
-        scale[3:] = scale[3:] + coeffs
+        cutoff = np.argmax(ns >= 3)
+        coeffs = expansion_coeff(gamma,
+                                 ks,
+                                 ns[cutoff:],
+                                 alpha=alpha,
+                                 delta=delta)
+        scale[cutoff:] = scale[cutoff:] + coeffs
     return baseline * scale
 
 
@@ -284,10 +319,10 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
     if delta == 0:
         log_powers = np.array([np.pow(np.log(ns), -k) for k in ks])
         coeffs = np.pow(-1, ks) * binom(
-            gamma, ks) * mp.gamma(-alpha) * rgamma_derivatives(ks, alpha)
+            gamma, ks) * mp.gamma(-alpha) * rgamma_derivatives(max(ks), alpha)
         return coeffs @ log_powers
     else:
-        ind_part = mp.gamma(-alpha) * rgamma_derivatives(ks, alpha)
+        ind_part = mp.gamma(-alpha) * rgamma_derivatives(max(ks), alpha)
         log_powers = np.array(
             [np.power(np.log(ns) * np.log(np.log(ns)), -k) for k in ks])
 
@@ -301,30 +336,33 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
 
         f = (1 - x * u)**gamma * (1 - (1 / x) * sym.log(1 - x * u))**delta
 
-        funcs = [sym.diff(f, u, k) / factorial(k) for k in ks]
+        funcs = [
+            sym.lambdify([x, u],
+                         sym.diff(f, u, k) / factorial(k)) for k in ks
+        ]
 
-        eks = np.array(
-            [[fk.evalf(subs={
-                u: 0,
-                x: np.log(np.log(n))
-            }) for n in ns] for fk in funcs],
-            dtype=float)
+        eks = [fk(np.log(np.log(ns)), 0) for fk in funcs]
+
+        # [fk.evalf(subs={
+        # u: 0,
+        # x: np.log(np.log(n))
+        # }) for n in ns] for fk in funcs],
+        # dtype=float)
 
         log_powers *= eks
 
         return ind_part @ log_powers
 
 
+@cache
 def rgamma_derivatives(k, alpha=-1 / 2):
     """
     Numerically computes the kth derivative(s) of the reciprocal gamma 
     function with negated argument
     """
-    print(k)
     f = lambda x: mp.rgamma(-x)
     try:
-        ds = np.array(list(mp.diffs(f, alpha, max(k))))
-        print(ds)
+        ds = np.array(list(mp.diffs(f, alpha, k)))
         return ds[1:]
     except IndexError:
         return mp.diff(f, alpha, k)
@@ -363,20 +401,32 @@ def combined_estimate(T, gamma, alpha=-1 / 2, delta=0, tol=1e-2):
 
 
 def f1(w):
+    """
+    Contribution of the polynomial part
+    """
     return (2 * mp.cos(w))**2
 
 
 def f2(w):
+    """
+    Contribution of the logarithmic part
+    """
     return (1 / 4) * mp.log(f1(w))**2 + w**2
 
 
 def f3(w):
+    """
+    (first) contribution of the iterated logarithmic part
+    """
     return (1 / 4) * mp.log(f2(w))**2
 
 
 def f4(w):
-    if w >= mp.pi / 2:
-        return 0
+    """
+    (second) contribution of the iterated logarithmic part
+    """
+    # if w >= mp.pi / 2:
+    #     return 0
     return (mp.atan2(w, -mp.log(2 * mp.cos(w))) +
             mp.atan2(-mp.sin(2 * w), -mp.cos(2 * w)))**2
 
@@ -387,15 +437,26 @@ def sens_function(alpha, gamma, delta):
     corresponding to the squared Taylor coefficients of our singular function
     by integration. This returns the integrand for the interval 0 to pi/2. 
     """
-    return lambda w: 4 * f1(w)**alpha * f2(w)**gamma * (f3(w) + f4(w))**delta
+    # TODO: check for constant factor error with change of variables
+    return lambda w: 2 / np.pi * f1(w)**alpha * f2(w)**gamma * (4 * (f3(
+        w) + f4(w)))**delta
 
 
 def compute_sensitivity(alpha, gamma, delta):
     """
     Actually integrate the function from above
     """
-    return mp.quad(sens_function(alpha, gamma, delta),
-                   [0, mp.pi / 3, mp.pi / 2])
+    return np.sqrt(
+        mp.quad(sens_function(alpha, gamma, delta), [0, mp.pi / 3, mp.pi / 2]))
+
+
+def compute_sensitivity_direct(alpha, gamma, delta):
+    return np.sqrt(
+        mp.quad(
+            lambda z: mp.fabs(
+                singular_function(
+                    mp.exp(1j * z), gamma, alpha=alpha, delta=delta))**2 /
+            (2 * mp.pi), [-mp.pi, 0, mp.pi]))
 
 
 def optimize_sensitivity(alpha, gamma):
