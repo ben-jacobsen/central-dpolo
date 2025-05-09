@@ -10,6 +10,7 @@ from functools import cache
 import mpmath as mp
 import numpy as np
 from numpy.fft import fft, ifft
+from scipy.optimize import minimize_scalar
 
 import singular_approximation as sa
 
@@ -113,7 +114,7 @@ class Anytime(Sequence):
         self.approximating = False
         self.asym_order = asym_order
         if delta is None:
-            self.optimize_delta()
+            self.delta = -6 * gamma / 5
         else:
             self.delta = delta
 
@@ -136,15 +137,16 @@ class Anytime(Sequence):
             newsize = max(k, self.size * 2)
             self._grow(newsize)
 
+        if self._left_seq.size < self.size:
+            self._left_seq = np.cumsum(fast_inv_ltt(self._seq))
+
         return self._left_seq[:k]
 
     def _grow(self, newsize):
         might_approx = self.tol > 0 and not self.approximating
         while might_approx and newsize > (int_step := min(
                 max(10000, self.size * 2), newsize)):
-            print(
-                f"{newsize} too large compared to {self.size}, trying {int_step} first..."
-            )
+            print(f"{newsize} >>> {self.size}, trying {int_step} first...")
             self._grow(int_step)
             might_approx = not self.approximating
 
@@ -171,16 +173,36 @@ class Anytime(Sequence):
             self._seq = sa.exact_convolution(newsize, self.gamma, self.alpha,
                                              self.delta)
 
-        self._left_seq = np.cumsum(fast_inv_ltt(self._seq))
+        # self._left_seq = np.cumsum(fast_inv_ltt(self._seq))
         self.size = newsize
 
     def sensitivity(self):
         return float(sa.compute_sensitivity(self.alpha, self.gamma,
                                             self.delta))
 
-    def optimize_delta(self):
-        super().__init__()
-        self.delta = sa.optimize_sensitivity(self.alpha, self.gamma)
+    def optimize_delta(self, T, **kwargs):
+        """
+        Given a *fixed* time horizon and gamma/alpha, find the delta parameter
+        minimizing actual variance at the final time step
+        """
+
+        def sens(delta):
+            return float(sa.compute_sensitivity(self.alpha, self.gamma, delta))
+
+        # def sens_growth_est(delta):
+        #     n = sym.Symbol('n')
+        #     d = sym.Symbol('d')
+        #     f = 4**d / np.pi * (1 / n) * (sym.log(n))**(-2 * self.gamma) * (
+        #         sym.log(sym.log(n)))**(-2 * d)
+
+        def se(delta):
+            return Anytime(self.alpha, -self.gamma,
+                           -delta).smooth_sensitivity(T)[-1]
+
+        return minimize_scalar(lambda delta: sens(delta) * se(delta) /
+                               (-self.gamma),
+                               **kwargs,
+                               options={'disp': True})
 
     def estimate_standard_error(self, k):
         """

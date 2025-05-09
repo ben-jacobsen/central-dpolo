@@ -8,8 +8,27 @@
 
     Around the point z=0. In this library, alpha is always assumed to be -1/2. 
 """
+"""
+    To prove optimal choice of delta: show that this minimizes
+    the difference l_t - l_{t-1} uniformly for all t > t0
+    and fixed gamma
+
+    Visually, can compute optimal choice of delta for a fixed
+    T and then show this converges to -6/5 for any fixed
+    gamma as T increases
+
+    also: calc 1, show that -6/5 gives desired 2nd coeff
+
+
+    can i use flint to speed up the inversion process?
+    flint.ctx.cap=1e6
+    s = flint.arb_series([1]*1e6)
+    x = flint.arb_series([0,1])
+    ((2 * (s.log() / x).log() / x).__pow__(0.66) * (s.log()/x).__pow__(-0.55) * s.sqrt()).coeffs()
+"""
 
 import argparse
+import os
 import warnings
 from functools import cache
 from math import factorial, isclose
@@ -19,6 +38,7 @@ import mpmath as mp
 import numpy as np
 import seaborn as sns
 import sympy as sym
+from scipy.optimize import minimize_scalar
 from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
@@ -99,18 +119,14 @@ def exact_convolution(T, gamma, alpha=-1 / 2, delta=0):
         T = len(T)
 
     poly_part = poly_coeffs(T - 1, alpha)
-    log_part = log_coeffs(T - 1)
+    log_part = log_coeffs(T - 1, gamma)
 
     if delta == 0:
-        return convolve(poly_part,
-                        power_coeffs_explicit(log_part, gamma),
-                        mode='full')[:T]
+        return convolve(poly_part, log_part, mode='full')[:T]
     else:
-        loglog_part = loglog_coeffs(T - 1)
-        return convolve(convolve(poly_part,
-                                 power_coeffs_explicit(log_part, gamma),
-                                 mode='full')[:T],
-                        power_coeffs_explicit(loglog_part, delta),
+        loglog_part = loglog_coeffs(T - 1, delta)
+        return convolve(convolve(poly_part, log_part, mode='full')[:T],
+                        loglog_part,
                         mode='full')[:T]
 
 
@@ -134,17 +150,26 @@ def poly_coeff_single(n, alpha=-1 / 2):
     return (1 - (1 + alpha) / n) * poly_coeff_single(n - 1, alpha)
 
 
-@cache
-def log_coeffs(n):
+def log_coeffs(n, gamma=1):
     """
     Returns the first n+1 coefficients in the Taylor expansion of
         f(x) = (1/x) ln(1/(1-x))
     """
-    return 1 / np.arange(1, n + 2)
+    name = f"log_{n}_{gamma}.npy"
+    if gamma != 1:
+        try:
+            with open(os.path.join("seq_cache", name), 'rb') as f:
+                return np.load(f)
+        except FileNotFoundError:
+            a = power_coeffs_explicit(1 / np.arange(1, n + 2), gamma)
+            with open(os.path.join("seq_cache", name), 'wb') as f:
+                np.save(f, a)
+            return a
+    else:
+        return 1 / np.arange(1, n + 2)
 
 
-@cache
-def loglog_coeffs(n):
+def loglog_coeffs(n, delta=1):
     """
     Returns the first n+1 coefficients in the Taylor expansion of
         g(x) = 2 * (1/x) ln( f(x) )
@@ -160,15 +185,24 @@ def loglog_coeffs(n):
     to reduce problem to series inversion + convolution + term-by-term
         differentiation and integration
     """
-    f_coeffs = log_coeffs(n + 1)
-    f_prime_coeffs = f_coeffs[1:] * np.arange(1, n + 2)
-    rf_coeffs = power_coeffs_explicit(f_coeffs, -1)
+    name = f"loglog_{n}_{delta}.npy"
+    try:
+        with open(os.path.join("seq_cache", name), 'rb') as f:
+            return np.load(f)
+    except FileNotFoundError:
+        if delta == 1:
+            f_coeffs = log_coeffs(n + 1)
+            f_prime_coeffs = f_coeffs[1:] * np.arange(1, n + 2)
+            rf_coeffs = power_coeffs_explicit(f_coeffs, -1)
 
-    xg_prime_coeffs = 2 * convolve(f_prime_coeffs, rf_coeffs)[:n + 1]
-    # integrate both sides, then divide by x
-    g_coeffs = xg_prime_coeffs / np.arange(1, n + 2)
-
-    return g_coeffs
+            xg_prime_coeffs = 2 * convolve(f_prime_coeffs, rf_coeffs)[:n + 1]
+            # integrate both sides, then divide by x
+            a = xg_prime_coeffs / np.arange(1, n + 2)
+        else:
+            a = power_coeffs_explicit(loglog_coeffs(n, 1), delta)
+        with open(os.path.join("seq_cache", name), 'wb') as f:
+            np.save(f, a)
+        return a
 
 
 def binary_components(k):
@@ -326,8 +360,6 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
         log_powers = np.array(
             [np.power(np.log(ns) * np.log(np.log(ns)), -k) for k in ks])
 
-        # TODO: is there a good way to translate the symbolic function to
-        # vectorized functions?
         if delta == int(delta):
             raise ValueError("delta must not be in the set 1,2,3,...")
 
@@ -442,6 +474,7 @@ def sens_function(alpha, gamma, delta):
         w) + f4(w)))**delta
 
 
+@cache
 def compute_sensitivity(alpha, gamma, delta):
     """
     Actually integrate the function from above
@@ -450,13 +483,32 @@ def compute_sensitivity(alpha, gamma, delta):
         mp.quad(sens_function(alpha, gamma, delta), [0, mp.pi / 3, mp.pi / 2]))
 
 
+@cache
 def compute_sensitivity_direct(alpha, gamma, delta):
+    """
+    Unsimplified version, for reference. Seems to be less numerically stable,
+    esp. when delta is large.
+    """
     return np.sqrt(
         mp.quad(
             lambda z: mp.fabs(
                 singular_function(
                     mp.exp(1j * z), gamma, alpha=alpha, delta=delta))**2 /
             (2 * mp.pi), [-mp.pi, 0, mp.pi]))
+
+
+def optimize_variance(T, alpha, gamma):
+    """
+    What is the optimal value of delta for fixed alpha, gamma, *and* T?
+    """
+    return minimize_scalar(
+        lambda delta: float(compute_sensitivity(alpha, gamma, delta))**2 *
+        (full_computation(
+            T * 2, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**
+         2 / full_computation(
+             T, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**2)[
+                 0],
+        bounds=(-1, 1))
 
 
 def optimize_sensitivity(alpha, gamma):

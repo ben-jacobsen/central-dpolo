@@ -37,8 +37,9 @@ def main():
         seq.Opt(T),
     ]
 
-    for delta in np.linspace(0, (1 / 2 + s) * 6 / 5, 4):
-        gamma = -1 / 2 - s
+    gamma = -1 / 2 - s
+    d_star = -6 * gamma / 5
+    for delta in np.linspace(d_star - 0.2, d_star + 0.2, 5):
         strategies.append(
             seq.Anytime(-1 / 2, gamma, delta, tol=1e-4, asym_order=4))
 
@@ -57,7 +58,7 @@ def main():
     axs[0, 0].sharey(axs[1, 0])
 
     steps = np.arange(1, T + 1)
-    view = np.arange(1, min(T, 1000))
+    view = np.arange(0, min(T, 1000))
     if T > 1000:
         res = T // 1000
         view = np.concatenate((view, np.arange(1000, T, res)), axis=None)
@@ -70,10 +71,10 @@ def main():
             sensitivity = strategy.sensitivity()
             l = strategy.first_k_left(T)
             r = strategy.first_k(T)
-            mid = (l[0] + r[0]) / 2
+            # mid = (l[0] + r[0]) / 2
             print(f"Sensitivity: {sensitivity}")
-            print(l[:10])
-            print(r[:10])
+            print(l[view])
+            print(r[view])
             se = strategy.standard_error(T)
             print(se[-1])
 
@@ -89,12 +90,12 @@ def main():
                          color=color)
 
             sns.lineplot(x=steps[view],
-                         y=r[view] / r[0] * mid,
+                         y=r[view],
                          ax=axs[1, 1],
                          label=strategy.name + " (R)",
                          color=color)
             sns.lineplot(x=steps[view],
-                         y=l[view] / l[0] * mid,
+                         y=l[view],
                          ax=axs[1, 1],
                          label=strategy.name + " (L)",
                          ls=':',
@@ -103,7 +104,8 @@ def main():
         print(strategy.noise_schedule(T)[view])
         sns.lineplot(
             x=steps[view],
-            y=strategy.noise_schedule(T)[view],  # se[view],
+            y=strategy.noise_schedule(T)[view] /
+            np.pow(np.log(steps[view]), 1 / 2 - gamma),  # se[view],
             ax=axs[0, 1],
             label=strategy.name)
 
@@ -114,27 +116,6 @@ def main():
     #              label=f"Expected SE (gamma={-1/2-s})")
     plt.legend()
     plt.show()
-
-    # df = pd.DataFrame.from_dict(cols, orient='columns')
-    # print(df)
-    # for c1, c2 in pairwise(df.columns):
-    #     print('-' * 80)
-    #     name = f"{c1}*{c2}"
-    #     print(name)
-    #     coeffs = np.convolve(df[c1], df[c2])[:T]
-    #     l1 = np.cumsum(np.abs(coeffs))
-    #     sns.lineplot(l1, label=name)
-    #     df[name] = l1
-    # # target = 'log_decay_inverse*optimal'
-    # # estimate = np.power((np.log(np.arange(1, T + 1))), 1 + s)
-    # # estimate -= estimate[0]
-    # # estimate /= estimate[-1]
-    # # estimate *= (df[target][T - 1] - df[target][0])
-    # # estimate += df[target][0]
-    # # sns.lineplot(estimate, label="log experiment")
-    # plt.xscale('log')
-    # plt.legend()
-    # plt.show()
 
 
 @cache

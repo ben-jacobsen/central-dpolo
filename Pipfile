@@ -15,6 +15,7 @@ scipy = "*"
 pyqt6 = "*"
 sympy = "*"
 pytest = "*"
+python-flint = "*"
 
 [dev-packages]
 
