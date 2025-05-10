@@ -20,31 +20,36 @@ from scipy.sparse.linalg import svds
 import sequences as seq
 import singular_approximation as sa
 
+sns.set_theme()
+sns.set_context('talk')
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-T', default=100, type=int)
-    parser.add_argument('-s', default=0.01, type=float)
+    parser.add_argument('--gammas', default=[-0.55], type=float, nargs='+')
+    parser.add_argument('--deltas', default=[0], type=float, nargs='+')
+    parser.add_argument('--no-cache', action="store_true")
+    parser.add_argument('--tol', type=float, default=1e-4)
     args = parser.parse_args()
     T = args.T
-    s = args.s
-
-    # A = la.toeplitz(np.ones(T), np.zeros(T))
+    sa.config['cache'] = not args.no_cache
 
     # delta = float(sa.optimize_sensitivity(-1 / 2, -1 / 2 - s))
 
-    strategies = [
-        seq.Opt(T),
-    ]
+    strategies = []
 
-    gamma = -1 / 2 - s
-    d_star = -6 * gamma / 5
-    for delta in np.linspace(d_star - 0.2, d_star + 0.2, 5):
-        strategies.append(
-            seq.Anytime(-1 / 2, gamma, delta, tol=1e-4, asym_order=4))
+    for gamma in args.gammas:
+        for delta in args.deltas:
+            strategies.append(
+                seq.Anytime(-1 / 2,
+                            gamma,
+                            delta=delta,
+                            tol=args.tol,
+                            asym_order=4))
 
-    # strategies.append(
-    #     seq.DoublingTrick(T // 2, seq.DoublingTrick.optimal_ratio(), T))
+    strategies.append(seq.Opt())
+    strategies.append(seq.DoublingTrick(100, T, exponential=True))
 
     fig, axs = plt.subplots(2, 2, layout='constrained')
     axs[0, 0].set_title("Sensitivity")
@@ -56,6 +61,7 @@ def main():
         ax.set_xscale('log')
         # ax.set_yscale('linear')
     axs[0, 0].sharey(axs[1, 0])
+    axs[0, 1].sharey(axs[1, 0])
 
     steps = np.arange(1, T + 1)
     view = np.arange(0, min(T, 1000))
@@ -67,6 +73,14 @@ def main():
         print('-' * 80)
         print(strategy.name)
         print('-' * 80)
+        if isinstance(strategy, seq.Opt):
+            color = 'black'
+            ls = ':'
+        else:
+            ls = '-'
+
+        kwargs = {'label': strategy.name, 'color': color, 'ls': ls}
+
         if isinstance(strategy, seq.Sequence):
             sensitivity = strategy.sensitivity()
             l = strategy.first_k_left(T)
@@ -81,40 +95,35 @@ def main():
             sns.lineplot(x=steps[view],
                          y=strategy.smooth_sensitivity()[view],
                          ax=axs[0, 0],
-                         label=strategy.name,
-                         color=color)
-            sns.lineplot(x=steps[view],
-                         y=se[view],
-                         ax=axs[1, 0],
-                         label=strategy.name,
-                         color=color)
+                         **kwargs)
+            sns.lineplot(x=steps[view], y=se[view], ax=axs[1, 0], **kwargs)
 
-            sns.lineplot(x=steps[view],
-                         y=r[view],
-                         ax=axs[1, 1],
-                         label=strategy.name + " (R)",
-                         color=color)
-            sns.lineplot(x=steps[view],
-                         y=l[view],
-                         ax=axs[1, 1],
-                         label=strategy.name + " (L)",
-                         ls=':',
-                         color=color)
+            sns.lineplot(x=steps[view], y=r[view], ax=axs[1, 1], **kwargs)
+            # sns.lineplot(x=steps[view],
+            #              y=l[view],
+            #              ax=axs[1, 1],
+            #              label=strategy.name + " (L)",
+            #              ls=':',
+            #              color=color)
 
         print(strategy.noise_schedule(T)[view])
         sns.lineplot(
             x=steps[view],
-            y=strategy.noise_schedule(T)[view] /
-            np.pow(np.log(steps[view]), 1 / 2 - gamma),  # se[view],
+            y=strategy.noise_schedule(T)
+            [view],  # / np.pow(np.log(steps[view]), 1 / 2 - gamma),  # se[view],
             ax=axs[0, 1],
-            label=strategy.name)
+            **kwargs)
 
     # sns.lineplot(x=steps[view],
     #              y=np.sqrt(1 + np.pow(np.log(steps[view]), 2 + 2 * s) /
     #                        (2 + 2 * s) / np.pi),
     #              ax=axs[1, 0],
     #              label=f"Expected SE (gamma={-1/2-s})")
-    plt.legend()
+    handles, labels = axs[0, 1].get_legend_handles_labels()
+    for ax in axs.reshape(-1):
+        ax.get_legend().remove()
+    fig.legend(handles, labels, loc='outside right upper')
+    # plt.legend()
     plt.show()
 
 

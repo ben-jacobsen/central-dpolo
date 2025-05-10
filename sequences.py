@@ -37,10 +37,12 @@ class Sequence:
         """
         raise NotImplementedError
 
-    def sensitivity(self):
+    def sensitivity(self, k=None):
         """
         Returns the l2 norm of the right sequence, for the purpose of
         deciding how much noise needs to be added to guarantee Gaussian DP
+
+        optionally includes time horizon
         """
         raise NotImplementedError
 
@@ -69,15 +71,15 @@ class Sequence:
 
         if smooth:
             return self.smooth_sensitivity(k) * self.standard_error(k)
-        return self.sensitivity() * self.standard_error(k)
+        return self.sensitivity(k) * self.standard_error(k)
 
 
 class Opt(Sequence):
 
-    def __init__(self, inputsize):
-        self.size = inputsize
-        self._seq = np.array([Opt.coeff(n) for n in range(inputsize)])
-        self.name = "Optimal"
+    def __init__(self):
+        super().__init__()
+        # self.size = inputsize
+        self.name = "Sqrt Decomposition"
 
     @staticmethod
     @cache
@@ -92,15 +94,22 @@ class Opt(Sequence):
 
     def first_k(self, k):
         if k > self.size:
-            raise ValueError(
-                f"Can't return first {k} from sequence of size {self.size}!")
+            self._seq = np.concatenate(
+                (self._seq,
+                 np.array([Opt.coeff(n) for n in range(self.size, k)])))
+            self.size = k
         return self._seq[:k]
 
     def first_k_left(self, k):
         return self.first_k(k)
 
-    def sensitivity(self):
-        return np.linalg.norm(self._seq)
+    def sensitivity(self, k=None):
+        if k is None:
+            k = self.size
+        if k <= 1e5:
+            return np.linalg.norm(self.first_k(k))
+        else:  # avoid exponential blowups with upper bound
+            return np.sqrt(1 + np.log(4 * k - 3) / np.pi)
 
 
 class Anytime(Sequence):
@@ -118,12 +127,11 @@ class Anytime(Sequence):
         else:
             self.delta = delta
 
-        self.name = f"Logarithmic (gamma={gamma:.2f}"
+        self.name = f"γ={gamma:.2f}"
         if delta != 0:
-            self.name += f", delta={delta:.2f}"
-        self.name += ")"
+            self.name += f", δ={delta:.2f}"
 
-        self._left_seq = np.array([1])
+        self._left_seq = np.array([])
 
     def first_k(self, k):
         if k > self.size:
@@ -157,7 +165,10 @@ class Anytime(Sequence):
                                            K=self.asym_order,
                                            delta=self.delta,
                                            single_coeff=True)
-            err = abs(estimate[0] - self._seq[self.size - 1])
+            err = abs(
+                max(estimate[0] /
+                    self._seq[self.size - 1], self._seq[self.size - 1] /
+                    estimate[0]) - 1)
             print(f"error: {err}")
             if err < self.tol:
                 print("Switching to asymptotics")
@@ -176,7 +187,7 @@ class Anytime(Sequence):
         # self._left_seq = np.cumsum(fast_inv_ltt(self._seq))
         self.size = newsize
 
-    def sensitivity(self):
+    def sensitivity(self, k=None):
         return float(sa.compute_sensitivity(self.alpha, self.gamma,
                                             self.delta))
 
@@ -219,20 +230,24 @@ class Anytime(Sequence):
 
 class DoublingTrick:
 
-    def __init__(self, init_chunk, ratio, totalsize):
+    def __init__(self, init_chunk, totalsize, exponential=False, ratio=2):
         self._subseqs = []
         self.size = 0
         self._next_chunk = init_chunk
         self.ratio = ratio
+        self.is_exp = exponential
         self.grow(totalsize)
 
-        self.name = f"Doubling Trick (chunk size {init_chunk}, ratio {ratio:.2f})"
+        self.name = f"Doubling Trick"
 
     def grow(self, newsize):
         while newsize - self.size > 0:
-            self._subseqs.append(Opt(self._next_chunk))
+            self._subseqs.append(self._next_chunk)
             self.size += self._next_chunk
-            self._next_chunk = int(self._next_chunk * self.ratio)
+            if self.is_exp:
+                self._next_chunk = self._next_chunk**2
+            else:
+                self._next_chunk = int(self._next_chunk * self.ratio)
 
     def noise_schedule(self, k=None):
         if k is None:
@@ -243,13 +258,14 @@ class DoublingTrick:
         i = 0
         extra_noise = 0
 
+        o = Opt()
         for subseq in self._subseqs:
-            remaining = min(k - i, subseq.size)
+            remaining = min(k - i, subseq)
             if remaining <= 0:
                 break
 
             i_next = i + remaining
-            schedule[i:i_next] = subseq.noise_schedule(remaining) + extra_noise
+            schedule[i:i_next] = o.noise_schedule(remaining) + extra_noise
 
             extra_noise += schedule[i_next - 1]
             i = i_next

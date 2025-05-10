@@ -33,6 +33,7 @@ import warnings
 from functools import cache
 from math import factorial, isclose
 
+import flint
 import matplotlib.pyplot as plt
 import mpmath as mp
 import numpy as np
@@ -42,6 +43,8 @@ from scipy.optimize import minimize_scalar
 from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
+config = {'cache': True}
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -49,6 +52,7 @@ def main():
     parser.add_argument('--gamma', type=float, default=-0.55)
     parser.add_argument('-K', type=int, default=1)
     parser.add_argument('--delta', type=float, default=0)
+    parser.add_argument('--no-cache', action="store_true")
     args = parser.parse_args()
 
     mp.prec = 53
@@ -57,6 +61,7 @@ def main():
     gamma = args.gamma
     K = args.K
     delta = args.delta
+    config['cache'] = not args.no_cache
 
     coeffs = {
         # 'Function Values':
@@ -157,14 +162,19 @@ def log_coeffs(n, gamma=1):
     """
     name = f"log_{n}_{gamma}.npy"
     if gamma != 1:
-        try:
-            with open(os.path.join("seq_cache", name), 'rb') as f:
-                return np.load(f)
-        except FileNotFoundError:
-            a = power_coeffs_explicit(1 / np.arange(1, n + 2), gamma)
+        if config['cache']:
+            try:
+                with open(os.path.join("seq_cache", name), 'rb') as f:
+                    return np.load(f)
+            except FileNotFoundError:
+                pass
+
+        # a = power_coeffs_explicit(1 / np.arange(1, n + 2), gamma)
+        a = power_coeffs_implicit(1 / np.arange(1, n + 2), gamma)
+        if config['cache']:
             with open(os.path.join("seq_cache", name), 'wb') as f:
                 np.save(f, a)
-            return a
+        return a
     else:
         return 1 / np.arange(1, n + 2)
 
@@ -186,23 +196,29 @@ def loglog_coeffs(n, delta=1):
         differentiation and integration
     """
     name = f"loglog_{n}_{delta}.npy"
-    try:
-        with open(os.path.join("seq_cache", name), 'rb') as f:
-            return np.load(f)
-    except FileNotFoundError:
-        if delta == 1:
-            f_coeffs = log_coeffs(n + 1)
-            f_prime_coeffs = f_coeffs[1:] * np.arange(1, n + 2)
-            rf_coeffs = power_coeffs_explicit(f_coeffs, -1)
+    if config['cache']:
+        try:
+            with open(os.path.join("seq_cache", name), 'rb') as f:
+                return np.load(f)
+        except FileNotFoundError:
+            pass
+    if delta == 1:
+        f_coeffs = log_coeffs(n + 1)
+        f_prime_coeffs = f_coeffs[1:] * np.arange(1, n + 2)
+        # rf_coeffs = power_coeffs_explicit(f_coeffs, -1)
+        rf_coeffs = power_coeffs_implicit(f_coeffs, -1)
 
-            xg_prime_coeffs = 2 * convolve(f_prime_coeffs, rf_coeffs)[:n + 1]
-            # integrate both sides, then divide by x
-            a = xg_prime_coeffs / np.arange(1, n + 2)
-        else:
-            a = power_coeffs_explicit(loglog_coeffs(n, 1), delta)
+        xg_prime_coeffs = 2 * convolve(f_prime_coeffs, rf_coeffs)[:n + 1]
+        # integrate both sides, then divide by x
+        a = xg_prime_coeffs / np.arange(1, n + 2)
+    else:
+        # a = power_coeffs_explicit(loglog_coeffs(n, 1), delta)
+        a = power_coeffs_implicit(loglog_coeffs(n, 1), delta)
+
+    if config['cache']:
         with open(os.path.join("seq_cache", name), 'wb') as f:
             np.save(f, a)
-        return a
+    return a
 
 
 def binary_components(k):
@@ -250,6 +266,23 @@ def power_coeffs_explicit(a_coeffs, p):
         b_coeffs[i] = (1 / (i * a0)) * (s1 - s2)
 
     return b_coeffs
+
+
+def power_coeffs_implicit(a_coeffs, p):
+    """
+    Given:
+        a_coeffs: a sequence of n+1 real numbers, the first non-zero,
+            interpreted as Taylor coefficients of some function f(x)
+        p: any real or complex number
+
+        Computes and returns the first n+1 Taylor coefficients of f(x)^p
+            using the definition f(x)^p = exp(p log(f(x))) 
+    """
+    a_coeffs = a_coeffs.tolist()
+    flint.ctx.cap = len(a_coeffs)
+    # TODO: might be interesting to track precision
+    return np.array(
+        flint.arb_series(a_coeffs).__pow__(p).coeffs()).astype(float)
 
 
 def l(x):
@@ -502,13 +535,15 @@ def optimize_variance(T, alpha, gamma):
     What is the optimal value of delta for fixed alpha, gamma, *and* T?
     """
     return minimize_scalar(
-        lambda delta: float(compute_sensitivity(alpha, gamma, delta))**2 *
-        (full_computation(
-            T * 2, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**
-         2 / full_computation(
-             T, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**2)[
-                 0],
+        lambda delta: float(compute_sensitivity(alpha, gamma, delta)) * np.
+        sqrt(np.sum(
+            exact_convolution(T, -gamma, alpha=alpha, delta=-delta)**2)),
         bounds=(-1, 1))
+    # (full_computation(
+    #     T * 2, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**
+    #  2 / full_computation(
+    #      T, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**2)[
+    #          0],
 
 
 def optimize_sensitivity(alpha, gamma):
