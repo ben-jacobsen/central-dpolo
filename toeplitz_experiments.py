@@ -5,6 +5,7 @@
 """
 
 import argparse
+import os
 from functools import cache
 from itertools import pairwise
 
@@ -14,7 +15,7 @@ import numpy as np
 import pandas as pd
 import scipy.linalg as la
 import seaborn as sns
-from numpy.fft import *
+from numpy.fft import fft, ifft
 from scipy.sparse.linalg import svds
 
 import sequences as seq
@@ -35,6 +36,9 @@ def main():
     T = args.T
     sa.config['cache'] = not args.no_cache
 
+    if not args.no_cache and not os.path.isdir('seq_cache'):
+        os.mkdir('seq_cache')
+
     # delta = float(sa.optimize_sensitivity(-1 / 2, -1 / 2 - s))
 
     strategies = []
@@ -50,6 +54,8 @@ def main():
 
     strategies.append(seq.Opt())
     strategies.append(seq.DoublingTrick(100, T, exponential=True))
+    # strategies.append(seq.Hybrid(w=seq.Hybrid.optimize_weight(T/100), init_chunk=100, exponential=False))
+    strategies.append(seq.Hybrid(w=0.5, init_chunk=100, exponential=True))
 
     fig, axs = plt.subplots(2, 2, layout='constrained')
     axs[0, 0].set_title("Sensitivity")
@@ -61,13 +67,18 @@ def main():
         ax.set_xscale('log')
         # ax.set_yscale('linear')
     axs[0, 0].sharey(axs[1, 0])
-    axs[0, 1].sharey(axs[1, 0])
+    # axs[0, 1].sharey(axs[1, 0])
 
     steps = np.arange(1, T + 1)
-    view = np.arange(0, min(T, 1000))
-    if T > 1000:
-        res = T // 1000
-        view = np.concatenate((view, np.arange(1000, T, res)), axis=None)
+    scale = 6
+    view = np.arange(min(T, 2**6))
+    i = 1
+    while T - 2**i > view[-1]:
+        next_chunk = np.arange(view[-1] + 2**i, min(T, 2**(i+scale)), 2**i)
+        view = np.concatenate((view, next_chunk), axis=None)
+        i += 1
+
+    # view = view[:T]
 
     for strategy, color in zip(strategies, sns.color_palette()):
         print('-' * 80)
@@ -109,7 +120,7 @@ def main():
         print(strategy.noise_schedule(T)[view])
         sns.lineplot(
             x=steps[view],
-            y=strategy.noise_schedule(T)
+            y=(strategy.noise_schedule(T) / seq.Opt().noise_schedule(T))
             [view],  # / np.pow(np.log(steps[view]), 1 / 2 - gamma),  # se[view],
             ax=axs[0, 1],
             **kwargs)

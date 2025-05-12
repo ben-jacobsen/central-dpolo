@@ -45,7 +45,6 @@ from scipy.special import binom
 
 config = {'cache': True}
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-T', type=int, default=100)

@@ -265,16 +265,100 @@ class DoublingTrick:
                 break
 
             i_next = i + remaining
-            schedule[i:i_next] = o.noise_schedule(remaining) + extra_noise
+            schedule[i:i_next] = (o.standard_error(remaining) * o.sensitivity(subseq))**2 + extra_noise
 
             extra_noise += schedule[i_next - 1]
             i = i_next
 
-        return schedule
+        return np.sqrt(schedule)
 
     @staticmethod
     def optimal_ratio():
         return float(mp.findroot(lambda b: b**1.5 - 2 * b + 1, 2))
+
+class Hybrid:
+    """
+    Hybrid algorithm, employing an Anytime algorithm that sums the condensed sequence
+
+    y_0 = x_0
+    \sum_{i=0}^k y_k = \sum_{j=0}^{2^k-1} x_j
+
+    or, expressed differently,
+
+    y_k = \sum_{j=2^{k-1}}^{2^k - 1} x_j
+
+    alongside a sequence of Optimal algorithms that sum all of the values
+    between the y_i releases. 
+    """
+
+    def __init__(self, alpha=-1/2, gamma=-0.51, delta=0, init_chunk=2, w=0.5, ratio=2, exponential=False):
+        """
+        alpha, gamma, delta are parameters of the Anytime algorithm, while
+        w controls the portion of the privacy budget allocated to the
+        Anytime algorithm
+        """
+        self._at = Anytime(alpha, gamma, delta)
+        self._subseqs = []
+        self.size = 0
+        self.w = w
+        self._next_chunk = init_chunk
+        self.ratio = ratio
+        self.exponential = exponential
+        self.name = f"Hybrid"
+
+
+    def grow(self, newsize):
+        while (remaining := newsize - self.size) > 0:
+            self._subseqs.append(self._next_chunk)
+            self.size += self._next_chunk 
+
+            if self.exponential:
+                self._next_chunk = self._next_chunk**2
+            else:
+                self._next_chunk = self.ratio * self._next_chunk
+
+
+
+    def noise_schedule(self, k=None):
+        if k is None:
+            k = self.size
+        if k > self.size:
+            self.grow(k)
+
+        schedule = np.zeros(k)
+        start_index = 0
+        o = Opt()
+        acc_local_var = 0
+        for i, subseq in enumerate(self._subseqs):
+            stop_index = min(start_index + subseq, k)
+            # the chunk we're looking at
+            # anytime error
+            at_var = self._at.noise_schedule(i+1)[i]**2 / self.w
+            # reuse the Doubling Trick info
+            combined_var = 2 * acc_local_var * at_var / (np.sqrt(at_var) + np.sqrt(acc_local_var))**2
+            schedule[start_index:stop_index] = combined_var
+
+            # subsequence error
+            diff = stop_index - start_index
+            local_var = (o.standard_error(diff) * o.sensitivity(k))**2 / (1-self.w)
+            schedule[start_index:stop_index] += local_var
+
+            start_index = stop_index
+            acc_local_var += local_var[-1]
+
+        return np.sqrt(schedule)
+
+
+    @staticmethod
+    def optimize_weight(T):
+        """ 
+        Cheat a little bit by calibrating weight to time horizon
+        """
+        return 1/(1 + (1 + np.log(T))/(1 + np.log(np.log2(T))))
+
+
+
+
 
 
 def fast_inv_ltt(a):
