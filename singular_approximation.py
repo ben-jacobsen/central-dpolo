@@ -8,32 +8,16 @@
 
     Around the point z=0. In this library, alpha is always assumed to be -1/2. 
 """
-"""
-    To prove optimal choice of delta: show that this minimizes
-    the difference l_t - l_{t-1} uniformly for all t > t0
-    and fixed gamma
-
-    Visually, can compute optimal choice of delta for a fixed
-    T and then show this converges to -6/5 for any fixed
-    gamma as T increases
-
-    also: calc 1, show that -6/5 gives desired 2nd coeff
-
-
-    can i use flint to speed up the inversion process?
-    flint.ctx.cap=1e6
-    s = flint.arb_series([1]*1e6)
-    x = flint.arb_series([0,1])
-    ((2 * (s.log() / x).log() / x).__pow__(0.66) * (s.log()/x).__pow__(-0.55) * s.sqrt()).coeffs()
-"""
 
 import argparse
 import os
 import warnings
+from copy import copy
 from functools import cache
 from math import factorial, isclose
 
 import flint
+import matplotlib
 import matplotlib.pyplot as plt
 import mpmath as mp
 import numpy as np
@@ -44,14 +28,20 @@ from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
 config = {'cache': True}
+matplotlib.use("qtagg")
+sns.set_style("darkgrid")
+sns.set_context('paper')
+sns.set(rc={"lines.linewidth": 3, "figure.dpi": 160, "savefig.dpi": 160})
+sns.set(font_scale=0.7)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-T', type=int, default=100)
     parser.add_argument('--gamma', type=float, default=-0.55)
     parser.add_argument('-K', type=int, default=1)
-    parser.add_argument('--delta', type=float, default=0)
+    parser.add_argument('--deltas', type=float, default=[0], nargs='+')
     parser.add_argument('--no-cache', action="store_true")
+    parser.add_argument('--relative', action="store_true")
     args = parser.parse_args()
 
     mp.prec = 53
@@ -59,46 +49,58 @@ def main():
     T = args.T
     gamma = args.gamma
     K = args.K
-    delta = args.delta
+    deltas = args.deltas
     config['cache'] = not args.no_cache
 
-    coeffs = {
-        # 'Function Values':
-        # [singular_function(z, gamma) for z in np.linspace(-1e-14, 1e-14, 11)],
-        # 'Direct Estimation':
-        # np.array(direct_estimation(T, gamma, delta=delta), dtype=float),
-        'Asymptotic Expansion':
-        np.array(asymptotic_expansion(T, gamma, delta=delta), dtype=float),
-        'Exact Convolution':
-        exact_convolution(T + 1, gamma),
-        # f'Order {K} Expansion':
-        # np.array(full_computation(T, gamma, K), dtype=float),
-        # 'Combined':
-        # np.array(combined_estimate(T, gamma), dtype=float),
-        # 'Combined Inverse':
-        # np.array(combined_estimate(T, -gamma), dtype=float),
-    }
-    # coeffs['Combined Product'] = fftconvolve(coeffs['Combined'],
-    # coeffs['Combined Inverse'],
-    # mode='full')[:T + 1]
+    fig, ax = plt.subplots(layout="constrained")
 
-    for k in np.arange(1, K + 1):
-        coeffs[f'Order {k} Expansion'] = np.array(full_computation(
-            T, gamma, k, delta=delta),
-                                                  dtype=float)
+    coeffs = {}
+    for delta, ls in zip(deltas, ['-', '--', ':', '-.']):
+        kwargs = {'ls': ls, 'ax': ax}
 
-    for k, v in coeffs.items():
-        pretty_print(v, k)
-        print(f"\tRatio: {(coeffs[k] / coeffs['Exact Convolution'])[-1]}")
-        sns.lineplot(v, label=k)
+        basename = f'Exact δ={delta:.2f}'
+        coeffs[basename] = (copy(kwargs | {'color': 'black'}), exact_convolution(T + 1, gamma, delta=delta))
+
+        for k, color in zip(np.arange(2, K + 1, 2), sns.color_palette("Dark2", K//2)):
+            kwargs['color'] = color
+
+            dname = "0" if delta == 0 else ("-γ" if delta == -gamma else f"{delta:.2f}")
+            name = f'δ={dname},K={k}'
+            val = np.array(full_computation(
+                T, gamma, k, delta=delta), dtype=float)
+            if args.relative:
+                val = np.abs(val - coeffs[basename][1]) / coeffs[basename][1]
+            coeffs[name] = (copy(kwargs), val)
+
+
+    for key, (kwargs, val) in coeffs.items():
+        # pretty_print(v, k)
+        # print(f"\tRatio: {(coeffs[k] / coeffs['Exact'])[-1]}")
+        if args.relative:
+            if key[:5] != 'Exact':
+                sns.lineplot(val, label=key, **kwargs)
+            # plt.ylim([-0.05, 0.05])
+        else:
+            sns.lineplot(val, label=key, **kwargs)
 
     # pretty_print(coeffs[f'Order {K} Expansion'] / coeffs['Exact Convolution'],
     #              'Asymptotic Ratio')
 
-    plt.yscale('log')
-    plt.xscale('log')
-    plt.grid()
-    plt.legend()
+        # plt.hlines(y=[0], xmin=0, xmax=T+1, colors=['black'], linestyle=[':'])
+    if args.relative:
+        ax.set_ylim([1e-7, 1])
+        # plt.legend(loc="lower left")
+    else:
+        ax.set_ylim([1/(2*np.sqrt(T * np.log(T))), 0.1])
+        # plt.legend(loc="upper right")
+    ax.set_yscale('log', base=2)
+    ax.set_xlim((10, T))
+    ax.set_xscale('log', base=2)
+    # plt.grid()
+    ax.legend(ncol=2, loc='lower left', framealpha=0.6, handlelength=1.5, columnspacing=1, labelspacing=0.25, fontsize=8)
+    ax.set_xlabel("t", fontsize=8, labelpad=0)
+    ax.set_ylabel("Relative Error", fontsize=8, labelpad=0)
+    fig.set_size_inches(w=2.5, h=2)
     plt.show()
 
 

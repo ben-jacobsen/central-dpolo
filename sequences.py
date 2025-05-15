@@ -79,7 +79,7 @@ class Opt(Sequence):
     def __init__(self):
         super().__init__()
         # self.size = inputsize
-        self.name = "Sqrt Decomposition"
+        self.name = "Sqrt Matrix"
 
     @staticmethod
     @cache
@@ -112,6 +112,26 @@ class Opt(Sequence):
             return np.sqrt(1 + np.log(4 * k - 3) / np.pi)
 
 
+class Independent(Sequence):
+
+    def __init__(self):
+        super().__init__()
+        self.name = "Ind"
+
+    def first_k(self, k):
+        if k > self.size:
+            self._seq = np.zeros(k)
+            self._seq[0] = 1
+            self.size = k
+        return self._seq[:k]
+
+    def first_k_left(self, k):
+        return np.ones(k)
+
+    def sensitivity(self, k=None):
+        return 1
+
+
 class Anytime(Sequence):
 
     def __init__(self, alpha, gamma, delta=None, tol=0, asym_order=5):
@@ -130,6 +150,8 @@ class Anytime(Sequence):
         self.name = f"γ={gamma:.2f}"
         if delta != 0:
             self.name += f", δ={delta:.2f}"
+        if self.tol != 0:
+            self.name += f", η={tol:.0e}"
 
         self._left_seq = np.array([])
 
@@ -188,7 +210,7 @@ class Anytime(Sequence):
         self.size = newsize
 
     def sensitivity(self, k=None):
-        return float(sa.compute_sensitivity(self.alpha, self.gamma,
+        return (1 + self.tol) * float(sa.compute_sensitivity(self.alpha, self.gamma,
                                             self.delta))
 
     def optimize_delta(self, T, **kwargs):
@@ -215,17 +237,39 @@ class Anytime(Sequence):
                                **kwargs,
                                options={'disp': True})
 
-    def estimate_standard_error(self, k):
-        """
-        Use Young's discrete convolution inequality to bound standard error
-        at time t by thinking of the left coefficients as the convolution
-        of the (1-x)^(-1/2) sequence and the coefficients of some logarithmic
-        function
-        """
-        opt_sens = np.sqrt(1 + np.log(4 * np.arange(k) + 1) / np.pi)
-        ratio_seq = Anytime(alpha=0, gamma=-self.gamma, delta=-self.delta)
 
-        return opt_sens * np.cumsum(np.abs(ratio_seq.first_k(k)))
+class BinaryMechanism:
+
+    def __init__(self, totalsize=0):
+        self.size = totalsize
+        self.name = "Binary"
+
+    @staticmethod
+    def _count_bits(t):
+        total = 0
+        for b in bin(t):
+            total += b == '1'
+        return total
+
+    def noise_schedule(self, k):
+        if k > self.size:
+            self.size = k
+        return np.sqrt(np.floor(np.log2(self.size)) + 1) * np.sqrt(np.array([BinaryMechanism._count_bits(t) for t in range(1,k+1)]))
+
+
+class SmoothBinary:
+
+    def __init__(self, totalsize=0):
+        self.size = totalsize
+        self.name = "Smooth Binary"
+
+
+    def noise_schedule(self, k):
+        if k > self.size:
+            self.size = k
+        return np.ones(k) / 2 * (np.log(self.size) + np.log(np.log(self.size)))
+
+
 
 
 class DoublingTrick:
@@ -291,20 +335,25 @@ class Hybrid:
     between the y_i releases. 
     """
 
-    def __init__(self, alpha=-1/2, gamma=-0.51, delta=0, init_chunk=2, w=0.5, ratio=2, exponential=False):
+    def __init__(self, at=None, bounded=None, init_chunk=2, w=0.5, ratio=2, exponential=False):
         """
         alpha, gamma, delta are parameters of the Anytime algorithm, while
         w controls the portion of the privacy budget allocated to the
         Anytime algorithm
         """
-        self._at = Anytime(alpha, gamma, delta)
+        if at is None:
+            at = Anytime(alpha=-1/2, gamma=-0.55, delta=0)
+        if bounded is None:
+            bounded = Opt()
+        self._at = at
+        self._bounded = bounded
         self._subseqs = []
         self.size = 0
         self.w = w
         self._next_chunk = init_chunk
         self.ratio = ratio
         self.exponential = exponential
-        self.name = f"Hybrid"
+        self.name = f"Hybrid ({at.name})"
 
 
     def grow(self, newsize):
@@ -327,7 +376,6 @@ class Hybrid:
 
         schedule = np.zeros(k)
         start_index = 0
-        o = Opt()
         acc_local_var = 0
         for i, subseq in enumerate(self._subseqs):
             stop_index = min(start_index + subseq, k)
@@ -340,8 +388,9 @@ class Hybrid:
 
             # subsequence error
             diff = stop_index - start_index
-            local_var = (o.standard_error(diff) * o.sensitivity(k))**2 / (1-self.w)
-            schedule[start_index:stop_index] += local_var
+            local_var = (self._bounded.noise_schedule(subseq))**2 / (1-self.w)
+            print(local_var)
+            schedule[start_index:stop_index] += local_var[:diff]
 
             start_index = stop_index
             acc_local_var += local_var[-1]
