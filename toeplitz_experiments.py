@@ -26,7 +26,9 @@ matplotlib.use("qtagg")
 sns.set_style("darkgrid")
 sns.set_context('paper')
 sns.set(rc={"lines.linewidth": 2.5, "figure.dpi": 160, "savefig.dpi": 160})
-sns.set(font_scale=0.7)
+sns.set(font_scale=0.85)
+
+fontsize = 8
 
 
 def main():
@@ -80,9 +82,20 @@ def main():
     num_plots = args.variance + args.coefficients
 
     fig = plt.figure(layout='constrained')
-    orig_axs = fig.subplot_mosaic([[str(j) for j in range(num_plots)] + ["legend"]],
-                                  width_ratios = [1.35] * num_plots + [1])
-    orig_axs['legend'].axis("off")
+    # orig_axs = fig.subplot_mosaic([[str(j) for j in range(num_plots)] + ["legend"]],
+    #                               width_ratios = [1.35] * num_plots + [1])
+    # orig_axs['legend'].axis("off")
+
+    if num_plots > 0:
+        orig_axs = fig.subplot_mosaic([
+            [str(j) for j in range(num_plots)], 
+            ["legend"] * num_plots, 
+            ],
+            height_ratios=[1, 0.3])
+        orig_axs['legend'].axis("off")
+    else:
+        orig_axs = {}
+
 
     kwarg_list = []
     for strategy, color in zip(strategies, sns.color_palette("Dark2", len(strategies)-1) + ['black']):
@@ -120,9 +133,9 @@ def main():
             orig_axs[str(i)].get_legend().remove()
         except AttributeError:
             pass
-    orig_axs["legend"].legend(h, l, ncol=1, loc='center left', frameon=False, 
-                              fontsize=8, borderpad=0.1, handlelength=1.5,
-                              handletextpad=0.4,
+    orig_axs["legend"].legend(h, l, ncol=3, loc='center', frameon=False, 
+                              fontsize=fontsize, borderpad=0.1, handlelength=1.5,
+                              handletextpad=0.3,
                               borderaxespad=0)
     bbox_px = orig_axs["legend"].get_legend().get_window_extent()
     dpi = fig.dpi
@@ -130,7 +143,8 @@ def main():
     # legend_width = bbox_px.width
     # fig.set_size_inches(w = (num_plots * legend_height + legend_width + 50 ) / dpi, 
     #                     h= legend_height/dpi)
-    fig.set_size_inches(w=6, h=2)
+    width = 2.5 * (args.variance + args.coefficients)
+    fig.set_size_inches(w=width, h=2.75)
     plt.show()
 
 
@@ -184,8 +198,8 @@ def coefficient_plot(T, strategies, kwargs, ax, relative=False):
 
 def variance_plot(T, strategies, kwargs, ax):
     ax.set_xscale('log', base=2)
-    ax.set_xlabel("t", fontsize=8, labelpad=0)
-    ax.set_ylabel("Variance", fontsize=8, labelpad=0)
+    ax.set_xlabel("t", fontsize=fontsize, labelpad=0)
+    ax.set_ylabel("Variance", fontsize=fontsize, labelpad=0)
     # ax.set_title('Mechanism Variance')
     # ax.set_title('Variance')
     steps, view = plotting_points(T)
