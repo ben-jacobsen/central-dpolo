@@ -116,7 +116,7 @@ class Independent(Sequence):
 
     def __init__(self):
         super().__init__()
-        self.name = "Ind"
+        self.name = "Independent noise"
 
     def first_k(self, k):
         if k > self.size:
@@ -147,7 +147,12 @@ class Anytime(Sequence):
         else:
             self.delta = delta
 
-        self.name = f"γ={gamma:.2f}"
+        self.name = f"Alg "
+        if self.tol:
+            self.name += "2"
+        else:
+            self.name += "1"
+        self.name += f"; γ={gamma:.2f}"
         if delta != 0:
             self.name += f", δ={delta:.2f}"
         if self.tol != 0:
