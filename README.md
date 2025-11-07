@@ -16,7 +16,7 @@ pipenv install
 
 ### Visualize Approximation Error
 
-Note: The first time these commands are run may be a little slow. By default, the intermediate each script computes are cached in a new folder called `seq_cache`, which speeds things up dramatically. If this behavior isn't desired, pass the `--no-cache` argument.
+Note: The first time these commands are run may be a little slow. By default, the intermediate results that each script computes are cached in a new folder called `seq_cache`, which speeds things up dramatically. If this behavior isn't desired, pass the `--no-cache` argument.
 
 This command generates a plot visualizing the relative error of different orders of asymptotic expansion (Figure 1 in the paper)
 
