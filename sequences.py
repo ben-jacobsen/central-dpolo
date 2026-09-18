@@ -12,6 +12,7 @@ import numpy as np
 from numpy.fft import fft, ifft
 from scipy.optimize import minimize_scalar
 
+import radial_sensitivity as rs
 import singular_approximation as sa
 
 
@@ -46,15 +47,19 @@ class Sequence:
         """
         raise NotImplementedError
 
-    def standard_error(self, k=None):
+    def standard_error(self, k=None, cumulative=True):
         """
         Returns the accumulated l2 norm of the left sequence, for the purpose
         of estimating error as a function of time
         """
         if k is None:
             k = self.size
-        return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
-                                        2))).astype(float)
+        errors = np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
+                                          2))).astype(float)
+        if cumulative:
+            return errors
+        else:
+            return errors[-1]
 
     def smooth_sensitivity(self, k=None):
         """
@@ -74,75 +79,54 @@ class Sequence:
         return self.sensitivity(k) * self.standard_error(k)
 
 
-class Opt(Sequence):
+class SmoothBinary:
 
-    def __init__(self):
-        super().__init__()
-        # self.size = inputsize
-        self.name = "Sqrt Decomposition"
+    def __init__(self, totalsize=0):
+        self.size = totalsize
+        self.name = "Smooth Binary"
 
-    @staticmethod
-    @cache
-    def coeff(k):
-        """
-        Computes the kth coefficient of the sequence recursively
-        """
-        if k == 0:
-            return 1
-
-        return (1 - 1 / (2 * k)) * Opt.coeff(k - 1)
-
-    def first_k(self, k):
+    def noise_schedule(self, k):
         if k > self.size:
-            self._seq = np.concatenate(
-                (self._seq,
-                 np.array([Opt.coeff(n) for n in range(self.size, k)])))
             self.size = k
-        return self._seq[:k]
-
-    def first_k_left(self, k):
-        return self.first_k(k)
-
-    def sensitivity(self, k=None):
-        if k is None:
-            k = self.size
-        if k <= 1e5:
-            return np.linalg.norm(self.first_k(k))
-        else:  # avoid exponential blowups with upper bound
-            return np.sqrt(1 + np.log(4 * k - 3) / np.pi)
+        return np.ones(k) / 2 * (np.log(self.size) + np.log(np.log(self.size)))
 
 
 class Anytime(Sequence):
 
-    def __init__(self, alpha, gamma, delta=None, tol=0, asym_order=5):
+    def __init__(self, alpha, gamma, N=mp.inf, delta=0, tol=0, asym_order=5):
         super().__init__()
 
         self.alpha = alpha
         self.gamma = gamma
+        self.N = N
         self.tol = tol  # threshold to switch to asymptotic expansion
         self.approximating = False
         self.asym_order = asym_order
-        if delta is None:
-            self.delta = -6 * gamma / 5
-        else:
-            self.delta = delta
+        self.delta = delta
+        self.is_unbounded = ((alpha < -1 / 2)
+                             or (alpha == -1 / 2 and gamma < -1 / 2)
+                             or (alpha == -1 / 2 and gamma == -1 / 2
+                                 and delta < -1 / 2))
 
-        self.name = f"γ={gamma:.2f}"
-        if delta != 0:
-            self.name += f", δ={delta:.2f}"
+        if gamma == 0 and delta == 0:
+            self.name = "Sqrt decomposition"
+        else:
+            self.name = f"γ={gamma:.2f}"
+            if delta != 0:
+                self.name += f", δ={delta:.2f}"
 
         self._left_seq = np.array([])
 
     def first_k(self, k):
         if k > self.size:
-            newsize = max(k, self.size * 2)
+            newsize = max(k, min(self.N, self.size * 2))
             self._grow(newsize)
 
         return self._seq[:k]
 
     def first_k_left(self, k):
         if k > self.size:
-            newsize = max(k, self.size * 2)
+            newsize = max(k, min(self.N, self.size * 2))
             self._grow(newsize)
 
         if self._left_seq.size < self.size:
@@ -151,6 +135,9 @@ class Anytime(Sequence):
         return self._left_seq[:k]
 
     def _grow(self, newsize):
+        if newsize > self.N:
+            raise ValueError(f"Cannot grow to size {newsize} > {self.N}")
+
         might_approx = self.tol > 0 and not self.approximating
         while might_approx and newsize > (int_step := min(
                 max(10000, self.size * 2), newsize)):
@@ -188,44 +175,89 @@ class Anytime(Sequence):
         self.size = newsize
 
     def sensitivity(self, k=None):
-        return float(sa.compute_sensitivity(self.alpha, self.gamma,
-                                            self.delta))
+        if k is None:
+            k = self.N
 
-    def optimize_delta(self, T, **kwargs):
+        if mp.isfinite(k):
+            if k < 2**10:
+                return np.linalg.norm(self.first_k(k))
+            else:
+                return float(
+                    mp.sqrt(
+                        rs.partial_sum(k - 1, self.gamma, self.alpha,
+                                       self.delta)))
+        else:
+            return float(
+                mp.sqrt(rs.full_norm_sq(self.gamma, self.alpha, self.delta)))
+
+    def standard_error(self, k=None, cumulative=True):
+        if k is None:
+            k = self.size
+
+        if cumulative:
+            return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
+                                            2))).astype(float)
+        elif k <= 2**10:
+            return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
+                                            2))).astype(float)[-1]
+        else:
+            return np.sqrt(
+                float(
+                    rs.partial_sum(k - 1, -self.gamma, -1 - self.alpha,
+                                   -self.delta)))
+
+    @staticmethod
+    def init_optimized(n_hat, N=mp.inf, short_name=True):
         """
-        Given a *fixed* time horizon and gamma/alpha, find the delta parameter
-        minimizing actual variance at the final time step
+        find the values of gamma, delta that approximately minimize variance at
+        time n_hat and return a new sequence with those parameters
         """
+        res = rs.optimize_parameters(n_hat, N)
+        at = Anytime(-1 / 2, res["gamma"], N=N, delta=res["delta"])
+        if short_name:
+            at.name = "\\hat{n} = " + str(n_hat)
+            if mp.isfinite(N):
+                at.name += ", N = " + str(N)
+        return at
 
-        def sens(delta):
-            return float(sa.compute_sensitivity(self.alpha, self.gamma, delta))
 
-        # def sens_growth_est(delta):
-        #     n = sym.Symbol('n')
-        #     d = sym.Symbol('d')
-        #     f = 4**d / np.pi * (1 / n) * (sym.log(n))**(-2 * self.gamma) * (
-        #         sym.log(sym.log(n)))**(-2 * d)
+class Opt(Anytime):
+    """
+    Implements special logic for the case where gamma = delta = 0
+    """
 
-        def se(delta):
-            return Anytime(self.alpha, -self.gamma,
-                           -delta).smooth_sensitivity(T)[-1]
+    def __init__(self, N):
+        super().__init__(alpha=-0.5, gamma=0, N=N)
 
-        return minimize_scalar(lambda delta: sens(delta) * se(delta) /
-                               (-self.gamma),
-                               **kwargs,
-                               options={'disp': True})
-
-    def estimate_standard_error(self, k):
+    @staticmethod
+    @cache
+    def coeff(k):
         """
-        Use Young's discrete convolution inequality to bound standard error
-        at time t by thinking of the left coefficients as the convolution
-        of the (1-x)^(-1/2) sequence and the coefficients of some logarithmic
-        function
+        Computes the kth coefficient of the sequence recursively
         """
-        opt_sens = np.sqrt(1 + np.log(4 * np.arange(k) + 1) / np.pi)
-        ratio_seq = Anytime(alpha=0, gamma=-self.gamma, delta=-self.delta)
+        if k == 0:
+            return 1
 
-        return opt_sens * np.cumsum(np.abs(ratio_seq.first_k(k)))
+        return (1 - 1 / (2 * k)) * Opt.coeff(k - 1)
+
+    def first_k(self, k):
+        if k > self.size:
+            self._seq = np.concatenate(
+                (self._seq,
+                 np.array([Opt.coeff(n) for n in range(self.size, k)])))
+            self.size = k
+        return self._seq[:k]
+
+    def first_k_left(self, k):
+        return self.first_k(k)
+
+    def sensitivity(self, k=None):
+        if k is None:
+            k = self.N
+        if k <= 2**10:
+            return np.linalg.norm(self.first_k(k))
+        else:  # avoid exponential blowups with analytic upper bound
+            return np.sqrt(1 + np.log(4 * k - 3) / np.pi)
 
 
 class DoublingTrick:
@@ -258,8 +290,8 @@ class DoublingTrick:
         i = 0
         extra_noise = 0
 
-        o = Opt()
         for subseq in self._subseqs:
+            o = Opt(N=subseq)
             remaining = min(k - i, subseq)
             if remaining <= 0:
                 break
@@ -275,6 +307,116 @@ class DoublingTrick:
     @staticmethod
     def optimal_ratio():
         return float(mp.findroot(lambda b: b**1.5 - 2 * b + 1, 2))
+
+
+class Independent(Sequence):
+
+    def __init__(self):
+        super().__init__()
+        self.name = "Independent noise"
+
+    def first_k(self, k):
+        if k > self.size:
+            self._seq = np.zeros(k)
+            self._seq[0] = 1
+            self.size = k
+        return self._seq[:k]
+
+    def first_k_left(self, k):
+        return np.ones(k)
+
+    def sensitivity(self, k=None):
+        return 1
+
+
+class Hybrid:
+    """
+    Hybrid algorithm, employing an Anytime algorithm that sums the condensed sequence
+
+    y_0 = x_0
+    \sum_{i=0}^k y_k = \sum_{j=0}^{2^k-1} x_j
+
+    or, expressed differently,
+
+    y_k = \sum_{j=2^{k-1}}^{2^k - 1} x_j
+
+    alongside a sequence of Optimal algorithms that sum all of the values
+    between the y_i releases. 
+    """
+
+    def __init__(self,
+                 at=None,
+                 bounded=None,
+                 init_chunk=2,
+                 w=0.5,
+                 ratio=2,
+                 exponential=False):
+        """
+        alpha, gamma, delta are parameters of the Anytime algorithm, while
+        w controls the portion of the privacy budget allocated to the
+        Anytime algorithm
+        """
+        if at is None:
+            at = Anytime(alpha=-1 / 2, gamma=-0.55, delta=0)
+        if bounded is None:
+            bounded = Opt(N=np.inf)
+        self._at = at
+        self._bounded = bounded
+        self._subseqs = []
+        self.size = 0
+        self.w = w
+        self._next_chunk = init_chunk
+        self.ratio = ratio
+        self.exponential = exponential
+        self.name = f"Hybrid ({at.name})"
+
+    def grow(self, newsize):
+        while (remaining := newsize - self.size) > 0:
+            self._subseqs.append(self._next_chunk)
+            self.size += self._next_chunk
+
+            if self.exponential:
+                self._next_chunk = self._next_chunk**2
+            else:
+                self._next_chunk = self.ratio * self._next_chunk
+
+    def noise_schedule(self, k=None):
+        if k is None:
+            k = self.size
+        if k > self.size:
+            self.grow(k)
+
+        schedule = np.zeros(k)
+        start_index = 0
+        acc_local_var = 0
+        for i, subseq in enumerate(self._subseqs):
+            stop_index = min(start_index + subseq, k)
+            # the chunk we're looking at
+            # anytime error
+            at_var = self._at.noise_schedule(i + 1)[i]**2 / self.w
+            # reuse the Doubling Trick info
+            combined_var = 2 * acc_local_var * at_var / (
+                np.sqrt(at_var) + np.sqrt(acc_local_var))**2
+            schedule[start_index:stop_index] = combined_var
+
+            # subsequence error
+            diff = stop_index - start_index
+            local_var = (self._bounded.noise_schedule(subseq))**2 / (1 -
+                                                                     self.w)
+            print(local_var)
+            schedule[start_index:stop_index] += local_var[:diff]
+
+            start_index = stop_index
+            acc_local_var += local_var[-1]
+
+        return np.sqrt(schedule)
+
+    @staticmethod
+    def optimize_weight(T):
+        """ 
+        Cheat a little bit by calibrating weight to time horizon
+        """
+        return 1 / (1 + (1 + np.log(T)) / (1 + np.log(np.log2(T))))
 
 
 def fast_inv_ltt(a):
