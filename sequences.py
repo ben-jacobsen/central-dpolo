@@ -81,14 +81,41 @@ class Sequence:
 
 class SmoothBinary:
 
+<<<<<<< HEAD
     def __init__(self, totalsize=0):
         self.size = totalsize
         self.name = "Smooth Binary"
+=======
+    def __init__(self):
+        super().__init__()
+        # self.size = inputsize
+        self.name = "Sqrt Matrix"
+>>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
     def noise_schedule(self, k):
         if k > self.size:
             self.size = k
         return np.ones(k) / 2 * (np.log(self.size) + np.log(np.log(self.size)))
+
+
+class Independent(Sequence):
+
+    def __init__(self):
+        super().__init__()
+        self.name = "Independent noise"
+
+    def first_k(self, k):
+        if k > self.size:
+            self._seq = np.zeros(k)
+            self._seq[0] = 1
+            self.size = k
+        return self._seq[:k]
+
+    def first_k_left(self, k):
+        return np.ones(k)
+
+    def sensitivity(self, k=None):
+        return 1
 
 
 class Anytime(Sequence):
@@ -108,12 +135,25 @@ class Anytime(Sequence):
                              or (alpha == -1 / 2 and gamma == -1 / 2
                                  and delta < -1 / 2))
 
+<<<<<<< HEAD
         if gamma == 0 and delta == 0:
             self.name = "Sqrt decomposition"
         else:
             self.name = f"γ={gamma:.2f}"
             if delta != 0:
                 self.name += f", δ={delta:.2f}"
+=======
+        self.name = f"Alg "
+        if self.tol:
+            self.name += "2"
+        else:
+            self.name += "1"
+        self.name += f"; γ={gamma:.2f}"
+        if delta != 0:
+            self.name += f", δ={delta:.2f}"
+        if self.tol != 0:
+            self.name += f", η={tol:.0e}"
+>>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
         self._left_seq = np.array([])
 
@@ -175,8 +215,13 @@ class Anytime(Sequence):
         self.size = newsize
 
     def sensitivity(self, k=None):
+<<<<<<< HEAD
         if k is None:
             k = self.N
+=======
+        return (1 + self.tol) * float(sa.compute_sensitivity(self.alpha, self.gamma,
+                                            self.delta))
+>>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
         if mp.isfinite(k):
             if k < 2**10:
@@ -229,6 +274,7 @@ class Opt(Anytime):
     def __init__(self, N):
         super().__init__(alpha=-0.5, gamma=0, N=N)
 
+<<<<<<< HEAD
     @staticmethod
     @cache
     def coeff(k):
@@ -258,6 +304,46 @@ class Opt(Anytime):
             return np.linalg.norm(self.first_k(k))
         else:  # avoid exponential blowups with analytic upper bound
             return np.sqrt(1 + np.log(4 * k - 3) / np.pi)
+=======
+        return minimize_scalar(lambda delta: sens(delta) * se(delta) /
+                               (-self.gamma),
+                               **kwargs,
+                               options={'disp': True})
+
+
+class BinaryMechanism:
+
+    def __init__(self, totalsize=0):
+        self.size = totalsize
+        self.name = "Binary"
+
+    @staticmethod
+    def _count_bits(t):
+        total = 0
+        for b in bin(t):
+            total += b == '1'
+        return total
+
+    def noise_schedule(self, k):
+        if k > self.size:
+            self.size = k
+        return np.sqrt(np.floor(np.log2(self.size)) + 1) * np.sqrt(np.array([BinaryMechanism._count_bits(t) for t in range(1,k+1)]))
+
+
+class SmoothBinary:
+
+    def __init__(self, totalsize=0):
+        self.size = totalsize
+        self.name = "Smooth Binary"
+
+
+    def noise_schedule(self, k):
+        if k > self.size:
+            self.size = k
+        return np.ones(k) / 2 * (np.log(self.size) + np.log(np.log(self.size)))
+
+
+>>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
 
 class DoublingTrick:
@@ -297,16 +383,105 @@ class DoublingTrick:
                 break
 
             i_next = i + remaining
-            schedule[i:i_next] = o.noise_schedule(remaining) + extra_noise
+            schedule[i:i_next] = (o.standard_error(remaining) * o.sensitivity(subseq))**2 + extra_noise
 
             extra_noise += schedule[i_next - 1]
             i = i_next
 
-        return schedule
+        return np.sqrt(schedule)
 
     @staticmethod
     def optimal_ratio():
         return float(mp.findroot(lambda b: b**1.5 - 2 * b + 1, 2))
+
+class Hybrid:
+    """
+    Hybrid algorithm, employing an Anytime algorithm that sums the condensed sequence
+
+    y_0 = x_0
+    \sum_{i=0}^k y_k = \sum_{j=0}^{2^k-1} x_j
+
+    or, expressed differently,
+
+    y_k = \sum_{j=2^{k-1}}^{2^k - 1} x_j
+
+    alongside a sequence of Optimal algorithms that sum all of the values
+    between the y_i releases. 
+    """
+
+    def __init__(self, at=None, bounded=None, init_chunk=2, w=0.5, ratio=2, exponential=False):
+        """
+        alpha, gamma, delta are parameters of the Anytime algorithm, while
+        w controls the portion of the privacy budget allocated to the
+        Anytime algorithm
+        """
+        if at is None:
+            at = Anytime(alpha=-1/2, gamma=-0.55, delta=0)
+        if bounded is None:
+            bounded = Opt()
+        self._at = at
+        self._bounded = bounded
+        self._subseqs = []
+        self.size = 0
+        self.w = w
+        self._next_chunk = init_chunk
+        self.ratio = ratio
+        self.exponential = exponential
+        self.name = f"Hybrid ({at.name})"
+
+
+    def grow(self, newsize):
+        while (remaining := newsize - self.size) > 0:
+            self._subseqs.append(self._next_chunk)
+            self.size += self._next_chunk 
+
+            if self.exponential:
+                self._next_chunk = self._next_chunk**2
+            else:
+                self._next_chunk = self.ratio * self._next_chunk
+
+
+
+    def noise_schedule(self, k=None):
+        if k is None:
+            k = self.size
+        if k > self.size:
+            self.grow(k)
+
+        schedule = np.zeros(k)
+        start_index = 0
+        acc_local_var = 0
+        for i, subseq in enumerate(self._subseqs):
+            stop_index = min(start_index + subseq, k)
+            # the chunk we're looking at
+            # anytime error
+            at_var = self._at.noise_schedule(i+1)[i]**2 / self.w
+            # reuse the Doubling Trick info
+            combined_var = 2 * acc_local_var * at_var / (np.sqrt(at_var) + np.sqrt(acc_local_var))**2
+            schedule[start_index:stop_index] = combined_var
+
+            # subsequence error
+            diff = stop_index - start_index
+            local_var = (self._bounded.noise_schedule(subseq))**2 / (1-self.w)
+            print(local_var)
+            schedule[start_index:stop_index] += local_var[:diff]
+
+            start_index = stop_index
+            acc_local_var += local_var[-1]
+
+        return np.sqrt(schedule)
+
+
+    @staticmethod
+    def optimize_weight(T):
+        """ 
+        Cheat a little bit by calibrating weight to time horizon
+        """
+        return 1/(1 + (1 + np.log(T))/(1 + np.log(np.log2(T))))
+
+
+
+
 
 
 class Independent(Sequence):
