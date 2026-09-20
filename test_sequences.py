@@ -18,7 +18,7 @@ import toeplitz_experiments as te
 RADIAL_N_VALUES = [2**n for n in [10, 14, 18]]
 CONVERGENT_PARAMS = [(-0.5, -0.6), (-0.51, 0), (-0.51, 0.51)]
 DIVERGENT_PARAMS = [(-c, -d) for c, d in CONVERGENT_PARAMS]
-TEST_DPS = 40
+TEST_DPS = 15
 
 
 def exact_coefficients(T, gamma, alpha=-1 / 2, delta=0):

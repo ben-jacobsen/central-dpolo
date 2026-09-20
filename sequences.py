@@ -5,18 +5,104 @@
         continual counting, represented as sequences of coefficients
 """
 
+import csv
+from abc import ABC, abstractmethod
+from copy import copy
 from functools import cache
+from pathlib import Path
 
 import mpmath as mp
 import numpy as np
 from numpy.fft import fft, ifft
-from scipy.optimize import minimize_scalar
 
 import radial_sensitivity as rs
 import singular_approximation as sa
 
+OPTIMIZATION_CACHE = Path("seq_cache") / "optimization_results.csv"
 
-class Sequence:
+
+def _optimization_cache_key(n_hat, N):
+    n_hat = int(n_hat)
+    N = "inf" if mp.isinf(N) else str(int(N))
+    return str(n_hat), N
+
+
+def _format_horizon(value):
+    """Format an integer horizon compactly for a mathtext legend label."""
+    value = int(value)
+    exponent = value.bit_length() - 1
+    if value == 2**exponent:
+        return rf"2^{{{exponent}}}"
+    return str(value)
+
+
+def _read_optimization_cache(path):
+    if not path.exists():
+        return {}
+    values = {}
+    try:
+        with path.open(newline="") as stream:
+            for row in csv.DictReader(stream):
+                try:
+                    key = (row["n_hat"], row["N"])
+                    values[key] = (float(row["gamma"]), float(row["delta"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        return {}
+    return values
+
+
+def _write_optimization_cache(path, values):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("n_hat", "N", "gamma", "delta"))
+        writer.writeheader()
+        for (n_hat, N), (gamma, delta) in sorted(values.items()):
+            writer.writerow({"n_hat": n_hat, "N": N, "gamma": repr(gamma), "delta": repr(delta)})
+    temporary.replace(path)
+
+
+class Mechanism(ABC):
+    """Common interface for normalized noise variances (privacy factor omitted)."""
+
+    @abstractmethod
+    def variances_at(self, times):
+        """Return variances at a 1-D array of positive integer times.
+
+        Preserve input order and duplicates; an empty input returns an empty
+        array. The mechanism's privacy horizon must not depend on these times.
+        """
+        raise NotImplementedError
+
+    def noise_schedule(self, k):
+        """Dense standard deviations, retained for callers needing every step."""
+        return np.sqrt(self.variances_at(np.arange(1, k + 1)))
+
+    def required_plot_times(self, T):
+        """Return mechanism-specific times that a plot should always include."""
+        if T < 1:
+            raise ValueError("T must be positive")
+        return np.array([], dtype=np.int64)
+
+    def _validate_times(self, times):
+        times = np.asarray(times)
+        if times.ndim != 1:
+            raise ValueError("times must be a one-dimensional array")
+        if times.size == 0:
+            return np.array([], dtype=np.int64)
+        if times.dtype.kind not in 'iu' or np.any(times < 1):
+            raise ValueError("times must contain positive integers")
+        if np.any(times > np.iinfo(np.int64).max):
+            raise ValueError("times exceed the supported integer range")
+        times = times.astype(np.int64)
+        if int(times.max()) > getattr(self, 'N', np.inf):
+            raise ValueError("requested time exceeds the privacy horizon N")
+        return times
+
+
+class Sequence(Mechanism):
 
     def __init__(self):
         self._seq = np.array([])
@@ -73,29 +159,42 @@ class Sequence:
     def noise_schedule(self, k=None, smooth=False):
         if k is None:
             k = self.size
+        if k > getattr(self, 'N', np.inf):
+            raise ValueError("requested time exceeds the privacy horizon N")
+        if k == 0:
+            return np.array([])
 
         if smooth:
             return self.smooth_sensitivity(k) * self.standard_error(k)
-        return self.sensitivity(k) * self.standard_error(k)
+        return self.sensitivity() * self.standard_error(k)
+
+    def variances_at(self, times):
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        unique, inverse = np.unique(times, return_inverse=True)
+        sensitivity_sq = self.sensitivity()**2
+        variances = np.array([
+            sensitivity_sq * self.standard_error(int(t), cumulative=False)**2
+            for t in unique
+        ])
+        return variances[inverse]
 
 
-class SmoothBinary:
-
-<<<<<<< HEAD
-    def __init__(self, totalsize=0):
+class SmoothBinary(Mechanism):
+    def __init__(self, totalsize):
+        if totalsize < 2:
+            raise ValueError("SmoothBinary requires a horizon of at least 2")
+        self.N = totalsize
         self.size = totalsize
         self.name = "Smooth Binary"
-=======
-    def __init__(self):
-        super().__init__()
-        # self.size = inputsize
-        self.name = "Sqrt Matrix"
->>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
     def noise_schedule(self, k):
-        if k > self.size:
-            self.size = k
-        return np.ones(k) / 2 * (np.log(self.size) + np.log(np.log(self.size)))
+        return np.sqrt(self.variances_at(np.arange(1, k + 1)))
+
+    def variances_at(self, times):
+        times = self._validate_times(times)
+        return np.full(times.size, ((np.log(self.N) + np.log(np.log(self.N))) / 2)**2)
 
 
 class Independent(Sequence):
@@ -117,15 +216,21 @@ class Independent(Sequence):
     def sensitivity(self, k=None):
         return 1
 
+    def variances_at(self, times):
+        return self._validate_times(times).astype(float)
+
 
 class Anytime(Sequence):
 
     def __init__(self, alpha, gamma, N=mp.inf, delta=0, tol=0, asym_order=5):
         super().__init__()
 
+        if mp.isnan(N) or N < 1 or (mp.isfinite(N) and int(N) != N):
+            raise ValueError("N must be a positive integer or infinity")
+
         self.alpha = alpha
         self.gamma = gamma
-        self.N = N
+        self.N = int(N) if mp.isfinite(N) else mp.inf
         self.tol = tol  # threshold to switch to asymptotic expansion
         self.approximating = False
         self.asym_order = asym_order
@@ -135,25 +240,12 @@ class Anytime(Sequence):
                              or (alpha == -1 / 2 and gamma == -1 / 2
                                  and delta < -1 / 2))
 
-<<<<<<< HEAD
         if gamma == 0 and delta == 0:
             self.name = "Sqrt decomposition"
         else:
             self.name = f"γ={gamma:.2f}"
             if delta != 0:
                 self.name += f", δ={delta:.2f}"
-=======
-        self.name = f"Alg "
-        if self.tol:
-            self.name += "2"
-        else:
-            self.name += "1"
-        self.name += f"; γ={gamma:.2f}"
-        if delta != 0:
-            self.name += f", δ={delta:.2f}"
-        if self.tol != 0:
-            self.name += f", η={tol:.0e}"
->>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
         self._left_seq = np.array([])
 
@@ -179,8 +271,14 @@ class Anytime(Sequence):
             raise ValueError(f"Cannot grow to size {newsize} > {self.N}")
 
         might_approx = self.tol > 0 and not self.approximating
-        while might_approx and newsize > (int_step := min(
-                max(10000, self.size * 2), newsize)):
+        while might_approx:
+            int_step = min(max(10000, self.size * 2), newsize)
+            cached_size = sa.cached_convolution_prefix(
+                self.gamma, self.alpha, self.delta)
+            if cached_size > self.size:
+                int_step = min(newsize, cached_size)
+            if newsize <= int_step:
+                break
             print(f"{newsize} >>> {self.size}, trying {int_step} first...")
             self._grow(int_step)
             might_approx = not self.approximating
@@ -196,7 +294,7 @@ class Anytime(Sequence):
                 max(estimate[0] /
                     self._seq[self.size - 1], self._seq[self.size - 1] /
                     estimate[0]) - 1)
-            print(f"error: {err}")
+            print(f"Relative error: {err}")
             if err < self.tol:
                 print("Switching to asymptotics")
                 self.approximating = True
@@ -215,13 +313,8 @@ class Anytime(Sequence):
         self.size = newsize
 
     def sensitivity(self, k=None):
-<<<<<<< HEAD
         if k is None:
             k = self.N
-=======
-        return (1 + self.tol) * float(sa.compute_sensitivity(self.alpha, self.gamma,
-                                            self.delta))
->>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
 
         if mp.isfinite(k):
             if k < 2**10:
@@ -238,11 +331,13 @@ class Anytime(Sequence):
     def standard_error(self, k=None, cumulative=True):
         if k is None:
             k = self.size
+        if k > self.N:
+            raise ValueError("requested time exceeds the privacy horizon N")
 
         if cumulative:
             return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
                                             2))).astype(float)
-        elif k <= 2**10:
+        elif k <= 2**24:
             return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
                                             2))).astype(float)[-1]
         else:
@@ -251,18 +346,50 @@ class Anytime(Sequence):
                     rs.partial_sum(k - 1, -self.gamma, -1 - self.alpha,
                                    -self.delta)))
 
+    def variances_at(self, times):
+        """Estimate variance without materializing coefficients at large times."""
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        unique, inverse = np.unique(times, return_inverse=True)
+        left_sq = np.empty(unique.size)
+        small = unique <= 2**24
+        if np.any(small):
+            prefix = np.cumsum(self.first_k_left(int(unique[small][-1]))**2)
+            left_sq[small] = prefix[unique[small] - 1]
+        for i in np.flatnonzero(~small):
+            left_sq[i] = float(rs.partial_sum(
+                int(unique[i]) - 1, -self.gamma, -1 - self.alpha, -self.delta))
+        return (self.sensitivity()**2 * left_sq)[inverse]
+
     @staticmethod
-    def init_optimized(n_hat, N=mp.inf, short_name=True):
+    def init_optimized(n_hat, N=mp.inf, short_name=True, cache=True,
+                       cache_path=OPTIMIZATION_CACHE, kwargs=None):
         """
         find the values of gamma, delta that approximately minimize variance at
         time n_hat and return a new sequence with those parameters
         """
-        res = rs.optimize_parameters(n_hat, N)
-        at = Anytime(-1 / 2, res["gamma"], N=N, delta=res["delta"])
+        if n_hat < 1 or int(n_hat) != n_hat or n_hat > N:
+            raise ValueError("n_hat must be a positive integer no greater than N")
+        cache_path = Path(cache_path)
+        key = _optimization_cache_key(n_hat, N)
+        cached = _read_optimization_cache(cache_path).get(key) if cache else None
+        if cached is None:
+            # Sequence horizons count coefficients; radial cutoffs are inclusive.
+            res = rs.optimize_parameters(n_hat - 1, N - 1)
+            gamma, delta = res["gamma"], res["delta"]
+            if cache:
+                values = _read_optimization_cache(cache_path)
+                values[key] = (float(gamma), float(delta))
+                _write_optimization_cache(cache_path, values)
+        else:
+            gamma, delta = cached
+        constructor_kwargs = {} if kwargs is None else dict(kwargs)
+        at = Anytime(-1 / 2, gamma, N=N, delta=delta, **constructor_kwargs)
         if short_name:
-            at.name = "\\hat{n} = " + str(n_hat)
+            at.name = rf"$\hat{{n}} = {_format_horizon(n_hat)}$"
             if mp.isfinite(N):
-                at.name += ", N = " + str(N)
+                at.name += rf", $N = {_format_horizon(N)}$"
         return at
 
 
@@ -271,10 +398,9 @@ class Opt(Anytime):
     Implements special logic for the case where gamma = delta = 0
     """
 
-    def __init__(self, N):
+    def __init__(self, N=np.inf):
         super().__init__(alpha=-0.5, gamma=0, N=N)
 
-<<<<<<< HEAD
     @staticmethod
     @cache
     def coeff(k):
@@ -287,6 +413,8 @@ class Opt(Anytime):
         return (1 - 1 / (2 * k)) * Opt.coeff(k - 1)
 
     def first_k(self, k):
+        if k > self.N:
+            raise ValueError("requested time exceeds the privacy horizon N")
         if k > self.size:
             self._seq = np.concatenate(
                 (self._seq,
@@ -300,20 +428,21 @@ class Opt(Anytime):
     def sensitivity(self, k=None):
         if k is None:
             k = self.N
-        if k <= 2**10:
+
+        if not mp.isfinite(k):
+            return np.inf
+        elif k <= 2**10:
             return np.linalg.norm(self.first_k(k))
         else:  # avoid exponential blowups with analytic upper bound
             return np.sqrt(1 + np.log(4 * k - 3) / np.pi)
-=======
-        return minimize_scalar(lambda delta: sens(delta) * se(delta) /
-                               (-self.gamma),
-                               **kwargs,
-                               options={'disp': True})
 
 
-class BinaryMechanism:
+class BinaryMechanism(Mechanism):
 
-    def __init__(self, totalsize=0):
+    def __init__(self, totalsize):
+        if totalsize < 1:
+            raise ValueError("BinaryMechanism requires a positive horizon")
+        self.N = totalsize
         self.size = totalsize
         self.name = "Binary"
 
@@ -325,28 +454,17 @@ class BinaryMechanism:
         return total
 
     def noise_schedule(self, k):
-        if k > self.size:
-            self.size = k
-        return np.sqrt(np.floor(np.log2(self.size)) + 1) * np.sqrt(np.array([BinaryMechanism._count_bits(t) for t in range(1,k+1)]))
+        return np.sqrt(self.variances_at(np.arange(1, k + 1)))
+
+    def variances_at(self, times):
+        times = self._validate_times(times)
+        return (int(self.N).bit_length() * np.array([
+            self._count_bits(int(t)) for t in times
+        ], dtype=float))
 
 
-class SmoothBinary:
 
-    def __init__(self, totalsize=0):
-        self.size = totalsize
-        self.name = "Smooth Binary"
-
-
-    def noise_schedule(self, k):
-        if k > self.size:
-            self.size = k
-        return np.ones(k) / 2 * (np.log(self.size) + np.log(np.log(self.size)))
-
-
->>>>>>> 9de8486417d8b06733cd3d757094c2d24ff25d74
-
-
-class DoublingTrick:
+class DoublingTrick(Mechanism):
 
     def __init__(self, init_chunk, totalsize, exponential=False, ratio=2):
         self._subseqs = []
@@ -385,126 +503,36 @@ class DoublingTrick:
             i_next = i + remaining
             schedule[i:i_next] = (o.standard_error(remaining) * o.sensitivity(subseq))**2 + extra_noise
 
-            extra_noise += schedule[i_next - 1]
+            extra_noise = schedule[i_next - 1]
             i = i_next
 
         return np.sqrt(schedule)
+
+    def variances_at(self, times):
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        self.grow(int(times.max()))
+        result = np.empty(times.size)
+        start, accumulated = 0, 0.0
+        for chunk in self._subseqs:
+            if start >= int(times.max()):
+                break
+            local = Opt(N=chunk)
+            selected = (times > start) & (times <= start + chunk)
+            checkpoints = np.concatenate((times[selected] - start, [chunk]))
+            values = local.variances_at(checkpoints)
+            result[selected] = accumulated + values[:-1]
+            accumulated += values[-1]
+            start += chunk
+        return result
 
     @staticmethod
     def optimal_ratio():
         return float(mp.findroot(lambda b: b**1.5 - 2 * b + 1, 2))
 
-class Hybrid:
-    """
-    Hybrid algorithm, employing an Anytime algorithm that sums the condensed sequence
 
-    y_0 = x_0
-    \sum_{i=0}^k y_k = \sum_{j=0}^{2^k-1} x_j
-
-    or, expressed differently,
-
-    y_k = \sum_{j=2^{k-1}}^{2^k - 1} x_j
-
-    alongside a sequence of Optimal algorithms that sum all of the values
-    between the y_i releases. 
-    """
-
-    def __init__(self, at=None, bounded=None, init_chunk=2, w=0.5, ratio=2, exponential=False):
-        """
-        alpha, gamma, delta are parameters of the Anytime algorithm, while
-        w controls the portion of the privacy budget allocated to the
-        Anytime algorithm
-        """
-        if at is None:
-            at = Anytime(alpha=-1/2, gamma=-0.55, delta=0)
-        if bounded is None:
-            bounded = Opt()
-        self._at = at
-        self._bounded = bounded
-        self._subseqs = []
-        self.size = 0
-        self.w = w
-        self._next_chunk = init_chunk
-        self.ratio = ratio
-        self.exponential = exponential
-        self.name = f"Hybrid ({at.name})"
-
-
-    def grow(self, newsize):
-        while (remaining := newsize - self.size) > 0:
-            self._subseqs.append(self._next_chunk)
-            self.size += self._next_chunk 
-
-            if self.exponential:
-                self._next_chunk = self._next_chunk**2
-            else:
-                self._next_chunk = self.ratio * self._next_chunk
-
-
-
-    def noise_schedule(self, k=None):
-        if k is None:
-            k = self.size
-        if k > self.size:
-            self.grow(k)
-
-        schedule = np.zeros(k)
-        start_index = 0
-        acc_local_var = 0
-        for i, subseq in enumerate(self._subseqs):
-            stop_index = min(start_index + subseq, k)
-            # the chunk we're looking at
-            # anytime error
-            at_var = self._at.noise_schedule(i+1)[i]**2 / self.w
-            # reuse the Doubling Trick info
-            combined_var = 2 * acc_local_var * at_var / (np.sqrt(at_var) + np.sqrt(acc_local_var))**2
-            schedule[start_index:stop_index] = combined_var
-
-            # subsequence error
-            diff = stop_index - start_index
-            local_var = (self._bounded.noise_schedule(subseq))**2 / (1-self.w)
-            print(local_var)
-            schedule[start_index:stop_index] += local_var[:diff]
-
-            start_index = stop_index
-            acc_local_var += local_var[-1]
-
-        return np.sqrt(schedule)
-
-
-    @staticmethod
-    def optimize_weight(T):
-        """ 
-        Cheat a little bit by calibrating weight to time horizon
-        """
-        return 1/(1 + (1 + np.log(T))/(1 + np.log(np.log2(T))))
-
-
-
-
-
-
-class Independent(Sequence):
-
-    def __init__(self):
-        super().__init__()
-        self.name = "Independent noise"
-
-    def first_k(self, k):
-        if k > self.size:
-            self._seq = np.zeros(k)
-            self._seq[0] = 1
-            self.size = k
-        return self._seq[:k]
-
-    def first_k_left(self, k):
-        return np.ones(k)
-
-    def sensitivity(self, k=None):
-        return 1
-
-
-class Hybrid:
+class Hybrid(Mechanism):
     """
     Hybrid algorithm, employing an Anytime algorithm that sums the condensed sequence
 
@@ -529,10 +557,11 @@ class Hybrid:
         """
         alpha, gamma, delta are parameters of the Anytime algorithm, while
         w controls the portion of the privacy budget allocated to the
-        Anytime algorithm
+        Anytime algorithm. bounded is a prototype copied and calibrated to
+        each chunk's horizon; the supplied object is not modified.
         """
         if at is None:
-            at = Anytime(alpha=-1 / 2, gamma=-0.55, delta=0)
+            at = Independent()
         if bounded is None:
             bounded = Opt(N=np.inf)
         self._at = at
@@ -555,6 +584,37 @@ class Hybrid:
             else:
                 self._next_chunk = self.ratio * self._next_chunk
 
+    def _bounded_for_chunk(self, chunk):
+        """Use the supplied bounded mechanism as a parameter prototype."""
+        bounded = copy(self._bounded)
+        bounded.N = chunk
+        if isinstance(bounded, (BinaryMechanism, SmoothBinary)):
+            bounded.size = chunk
+        return bounded
+
+    def required_plot_times(self, T):
+        """Include both sides of every bounded-segment boundary up to ``T``."""
+        if T < 1:
+            raise ValueError("T must be positive")
+
+        times = {1, int(T)}
+        start = 1
+        # ``_next_chunk`` is mutable, so use the first materialized segment
+        # when available; otherwise it is still the initial chunk size.
+        chunk = int(self._subseqs[0] if self._subseqs else self._next_chunk)
+        while start <= T:
+            for time in (start - 1, start, start + 1):
+                if 1 <= time <= T:
+                    times.add(time)
+            start += chunk
+            if self.exponential:
+                chunk = chunk**2
+            else:
+                chunk = int(chunk * self.ratio)
+            if chunk < 1:
+                raise ValueError("Hybrid chunk growth must remain positive")
+        return np.array(sorted(times), dtype=np.int64)
+
     def noise_schedule(self, k=None):
         if k is None:
             k = self.size
@@ -565,6 +625,8 @@ class Hybrid:
         start_index = 0
         acc_local_var = 0
         for i, subseq in enumerate(self._subseqs):
+            if start_index >= k:
+                break
             stop_index = min(start_index + subseq, k)
             # the chunk we're looking at
             # anytime error
@@ -576,15 +638,33 @@ class Hybrid:
 
             # subsequence error
             diff = stop_index - start_index
-            local_var = (self._bounded.noise_schedule(subseq))**2 / (1 -
-                                                                     self.w)
-            print(local_var)
+            local_var = self._bounded_for_chunk(subseq).noise_schedule(subseq)**2 / (1 - self.w)
             schedule[start_index:stop_index] += local_var[:diff]
 
             start_index = stop_index
             acc_local_var += local_var[-1]
 
         return np.sqrt(schedule)
+
+    def variances_at(self, times):
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        self.grow(int(times.max()))
+        result = np.empty(times.size)
+        chunk_count = np.searchsorted(np.cumsum(self._subseqs), times.max()) + 1
+        at_vars = self._at.variances_at(np.arange(1, chunk_count + 1)) / self.w
+        start, accumulated = 0, 0.0
+        for i, chunk in enumerate(self._subseqs[:chunk_count]):
+            at_var = at_vars[i]
+            combined = 2 * accumulated * at_var / (np.sqrt(at_var) + np.sqrt(accumulated))**2
+            selected = (times > start) & (times <= start + chunk)
+            checkpoints = np.concatenate((times[selected] - start, [chunk]))
+            local = self._bounded_for_chunk(chunk).variances_at(checkpoints) / (1 - self.w)
+            result[selected] = combined + local[:-1]
+            accumulated += local[-1]
+            start += chunk
+        return result
 
     @staticmethod
     def optimize_weight(T):

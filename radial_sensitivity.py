@@ -1,5 +1,5 @@
 """
-    File: singular_approximation.py
+    File: radial_sensitivity.py
     Author: Ben Jacobsen
     Purpose: implements methods for computing and bounding the
        finite-horizon sensitivity of Toeplitz factorizations
@@ -8,13 +8,32 @@
 
 import cmath
 import math
+from functools import lru_cache
 
 import mpmath as mp
 import numpy as np
 from scipy.integrate import quad_vec
 from scipy.optimize import minimize, minimize_scalar
 
-import singular_approximation as sa
+
+@lru_cache(maxsize=4096)
+def _unit_circle(theta, precision):
+    """Cache angular exponentials separately for each working precision.
+
+    Called at the current mp.mp.prec, which must also be supplied as the key.
+    The bounded cache is shared across radii and repeated partial sums.
+    """
+    return mp.exp(1j * theta)
+
+
+def _sqrt_damped_norm_sq(complement):
+    """Square-root factor norm, given the complementary parameter 1-r**2.
+
+    Sum ((1/2)_n/n!)**2 r**(2n) = 2/pi * K(r**2), where K uses
+    the parameter convention. Carlson's form avoids subtracting from one
+    inside K when the supplied complement is tiny.
+    """
+    return 2 * mp.elliprf(0, complement, 1) / mp.pi
 
 
 def full_norm_sq(gamma, alpha=-1 / 2, delta=0, tail_cutoff=2**10):
@@ -142,15 +161,34 @@ def damped_norm_sq(r, gamma, alpha=-1 / 2, delta=0):
     Since the Taylor coefficients are real, the integrand is symmetric and
     we integrate over [0, pi].  The breakpoint at pi/3 is not mathematically
     necessary, but is useful numerically when r is close to 1.
+
+    The square-root factor (alpha=-1/2, gamma=delta=0) uses a complete
+    elliptic integral instead of quadrature. Other real exponents use real
+    powers of moduli, with cached angular exponentials shared across radii.
     """
     r = mp.mpf(r)
     if not 0 < r < 1:
         raise ValueError("r must lie strictly between 0 and 1")
 
+    alpha, gamma, delta = map(mp.mpf, (alpha, gamma, delta))
+    if alpha == -mp.mpf('0.5') and gamma == 0 and delta == 0:
+        return _sqrt_damped_norm_sq((1 - r) * (1 + r))
+    # Match the generating function's limiting value at the origin.
+    if r < mp.mpf('1e-20'):
+        return mp.mpf(1)
+
     def integrand(theta):
-        z = r * mp.exp(1j * theta)
-        return mp.fabs(sa.singular_function(z, gamma, alpha=alpha,
-                                            delta=delta))**2
+        z = r * _unit_circle(theta, mp.mp.prec)
+        one_minus_z = 1 - z
+        value = mp.power(mp.fabs(one_minus_z), 2 * alpha)
+        if gamma != 0 or delta != 0:
+            A = -mp.log(one_minus_z) / z
+            if gamma != 0:
+                value *= mp.power(mp.fabs(A), 2 * gamma)
+            if delta != 0:
+                B = 2 * mp.log(A) / z
+                value *= mp.power(mp.fabs(B), 2 * delta)
+        return value
 
     return mp.quad(integrand, [0, mp.pi / 3, mp.pi]) / mp.pi
 
@@ -172,7 +210,7 @@ def finite_upper_bound(N, r, gamma, alpha=-1 / 2, delta=0):
         r, gamma, alpha=alpha, delta=delta)
 
 
-def partial_sum(N, gamma, alpha=-1 / 2, delta=0, degree=12):
+def partial_sum(N, gamma, alpha=-1 / 2, delta=0, degree=None):
     """
     Numerically recover the inclusive finite squared coefficient sum
 
@@ -194,25 +232,31 @@ def partial_sum(N, gamma, alpha=-1 / 2, delta=0, degree=12):
     midpoint across the jump, whereas N + 1/2 lies on the constant plateau
     whose value is the inclusive sum through N.
 
-    degree=12 has worked well empirically for this family.
+    If ``degree`` is omitted, mpmath selects the Stehfest degree from the
+    active working precision. This is the recommended accuracy-oriented mode.
+    Passing an even positive degree explicitly remains available for faster,
+    reproducible exploratory calculations. For general exponents and very
+    large N, forming r=exp(-q/2) at the inversion routine's internal
+    precision can lose accuracy in 1-r; the square-root special case avoids
+    forming r and its small gap entirely.
     """
     if N < 0:
         raise ValueError("N must be nonnegative")
-    if degree <= 0 or degree % 2:
+    if degree is not None and (degree <= 0 or degree % 2):
         raise ValueError("Stehfest degree must be a positive even integer")
 
     x = mp.mpf(N) + mp.mpf("0.5")
 
     def transform(q):
+        if alpha == -0.5 and gamma == 0 and delta == 0:
+            return _sqrt_damped_norm_sq(-mp.expm1(-q)) / q
         r = mp.exp(-q / 2)
         return damped_norm_sq(r, gamma, alpha=alpha, delta=delta) / q
 
-    return mp.invertlaplace(
-        transform,
-        x,
-        method="stehfest",
-        degree=degree,
-    )
+    kwargs = {"method": "stehfest"}
+    if degree is not None:
+        kwargs["degree"] = degree
+    return mp.invertlaplace(transform, x, **kwargs)
 
 
 def log_finite_upper_bound(N, s, gamma, alpha=-1 / 2, delta=0):

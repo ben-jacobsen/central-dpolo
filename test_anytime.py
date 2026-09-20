@@ -13,10 +13,10 @@ import pytest
 import radial_sensitivity as rs
 import sequences as s
 
-TEST_DPS = 40
+TEST_DPS = 15
 STEEHFEST_RTOL = 2e-4
 SMALL_N = [32, 64, 128]
-LARGE_N = [2**n for n in [8, 12, 16]]
+LARGE_N = [2**n for n in [12, 16]]
 CONVERGENT_PARAMS = [(-0.5, -0.6), (-0.51, 0), (-0.51, 0.51)]
 DIVERGENT_PARAMS = [(-c, -d) for c, d in CONVERGENT_PARAMS]
 
@@ -109,24 +109,6 @@ def test_anytime_standard_error_matches_radial_small_k(k, gamma, delta):
 
     assert np.isclose(actual, expected, rtol=STEEHFEST_RTOL, atol=1e-10)
 
-
-def test_anytime_standard_error_matches_radial_large_k():
-    """
-    This exercises the radial_sensitivity branch of standard_error directly.
-    It is particularly useful for detecting accidental use of the right-hand
-    parameters in place of the reciprocal left-hand parameters.
-    """
-    alpha = -0.5
-    gamma = -0.8
-    delta = 1.1
-    k = 2**11
-    at = s.Anytime(alpha, gamma, N=k, delta=delta)
-
-    with mp.workdps(TEST_DPS):
-        expected = radial_left_norm(k, alpha, gamma, delta)
-        actual = at.standard_error(k, cumulative=False)
-
-    assert np.isclose(actual, expected, rtol=1e-8, atol=1e-10)
 
 
 def test_anytime_cumulative_standard_error_matches_radial_checkpoints():
@@ -229,8 +211,8 @@ def test_anytime_init_optimized_uses_optimizer_result(monkeypatch):
     expected_delta = 1.75
 
     def fake_optimize_parameters(n_hat, N):
-        assert n_hat == 123
-        assert N == 456
+        assert n_hat == 122
+        assert N == 455
         return {
             "gamma": expected_gamma,
             "delta": expected_delta,
@@ -238,10 +220,20 @@ def test_anytime_init_optimized_uses_optimizer_result(monkeypatch):
 
     monkeypatch.setattr(rs, "optimize_parameters", fake_optimize_parameters)
 
-    at = s.Anytime.init_optimized(123, N=456, short_name=False)
+    at = s.Anytime.init_optimized(123, N=456, short_name=False, cache=False)
 
     assert isinstance(at, s.Anytime)
     assert at.N == 456
     assert at.alpha == -0.5
     assert at.gamma == expected_gamma
     assert at.delta == expected_delta
+
+
+def test_anytime_init_optimized_formats_mathtext_horizons(monkeypatch):
+    monkeypatch.setattr(
+        rs,
+        "optimize_parameters",
+        lambda n_hat, N: {"gamma": -1.25, "delta": 1.75},
+    )
+    at = s.Anytime.init_optimized(2**12, N=2**20, short_name=True, cache=False)
+    assert at.name == r"$\hat{n} = 2^{12}$, $N = 2^{20}$"

@@ -8,6 +8,7 @@ import argparse
 import os
 from functools import cache
 from itertools import pairwise
+from time import perf_counter
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -22,61 +23,94 @@ from scipy.sparse.linalg import svds
 import sequences as seq
 import singular_approximation as sa
 
-matplotlib.use("qtagg")
 sns.set_style("darkgrid")
 sns.set_context('paper')
 sns.set(rc={"lines.linewidth": 2.5, "figure.dpi": 160, "savefig.dpi": 160})
 sns.set(font_scale=0.85)
 
 fontsize = 8
+HYBRID_PLOT_MULTIPLIER = 4
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-T', default=100, type=int)
-    parser.add_argument('--gammas', default=[-0.55], type=float, nargs='*')
+    parser.add_argument('-T', default=2**16, type=int)
+    parser.add_argument('--N', type=float, default=np.inf,
+                        help='privacy horizon for Anytime (default: inf)')
+    parser.add_argument('--plot-points', type=int, default=100,
+                        help='maximum number of logarithmically spaced plot points')
+    parser.add_argument('--n-hats', default=[2**12], type=int, nargs='*')
+    parser.add_argument('--gammas', default=[], type=float, nargs='*')
     parser.add_argument('--deltas', default=[0], type=float, nargs='*')
     parser.add_argument('--no-cache', action="store_true")
     parser.add_argument('--tol', type=float, default=0)
     parser.add_argument('--coefficients', action="store_true")
     parser.add_argument('--variance', action="store_true")
+    parser.add_argument('--verbose', action="store_true",
+                        help='print timing updates while building and plotting')
 
     args = parser.parse_args()
     T = args.T
+    if T < 1 or args.plot_points < 2:
+        parser.error('T must be positive and --plot-points must be at least 2')
+    if not args.variance and not args.coefficients:
+        parser.error('select --variance and/or --coefficients')
+    N = args.N
+    if np.isnan(N) or N < T or (np.isfinite(N) and not N.is_integer()):
+        parser.error('N must be an integer at least T, or inf')
+    N = int(N) if np.isfinite(N) else np.inf
+    if any(n < 1 or n > N for n in args.n_hats):
+        parser.error('each n-hat must be positive and no greater than N')
     sa.config['cache'] = not args.no_cache
 
     if not args.no_cache and not os.path.isdir('seq_cache'):
         os.mkdir('seq_cache')
 
-    # delta = float(sa.optimize_sensitivity(-1 / 2, -1 / 2 - s))
-
     strategies = []
-    strategies.append(seq.Hybrid(
-        at= seq.Anytime(-1/2, -0.55, delta=0), 
+
+    def add_strategy(strategy, started=None):
+        if started is None:
+            started = perf_counter()
+        strategies.append(strategy)
+        if args.verbose:
+            print(f"Added strategy {strategy.name} ({perf_counter() - started:.3f}s)",
+                  flush=True)
+    # strategies.append(seq.Hybrid(
+    #     at= seq.Anytime(-1/2, -0.55, delta=0),
+    #     w=0.25, init_chunk=2, exponential=False))
+    add_strategy(seq.Hybrid(
+        at= seq.Independent(),
         w=0.25, init_chunk=2, exponential=False))
-    strategies.append(seq.Hybrid(
-        at= seq.Independent(), 
-        w=0.25, init_chunk=2, exponential=False))
-    strategies.append(seq.Anytime(-1/2, -0.51, delta=0,
-                                  tol=1e-4, asym_order=6))
+    # strategies.append(seq.Anytime(-1/2, -0.51, delta=0,
+                                  # tol=1e-4, asym_order=6))
     for gamma in args.gammas:
         for delta in args.deltas:
-            strategies.append(
+            add_strategy(
                 seq.Anytime(-1 / 2,
                             gamma,
+                            N=N,
                             delta=delta,
                             tol=args.tol,
                             asym_order=4))
+
+    for n_hat in args.n_hats:
+        started = perf_counter()
+        strategy = seq.Anytime.init_optimized(
+            n_hat, N=N, cache=not args.no_cache,
+            kwargs={'tol': args.tol, 'asym_order': 4})
+        add_strategy(strategy, started=started)
     # strategies.append(seq.BinaryMechanism(T))
     # strategies.append(seq.Hybrid(
     #     at= seq.Anytime(-1/2, -0.55, delta=0),
-    #     bounded = seq.SmoothBinary(),
+    #     bounded = seq.SmoothBinary(2),
     #     w=0.25, init_chunk=2, exponential=False))
-    strategies.append(seq.SmoothBinary(T))
+    add_strategy(seq.SmoothBinary(T))
     # strategies.append(seq.DoublingTrick(100, T, exponential=True))
 
     # Opt always goes last
-    strategies.append(seq.Opt())
+    baseline = seq.Opt(N=T)
+    # baseline.name = f"Sqrt decomposition (N={T})"
+    add_strategy(baseline)
 
 
     num_plots = args.variance + args.coefficients
@@ -88,8 +122,8 @@ def main():
 
     if num_plots > 0:
         orig_axs = fig.subplot_mosaic([
-            [str(j) for j in range(num_plots)], 
-            ["legend"] * num_plots, 
+            [str(j) for j in range(num_plots)],
+            ["legend"] * num_plots,
             ],
             height_ratios=[1, 0.3])
         orig_axs['legend'].axis("off")
@@ -113,10 +147,12 @@ def main():
 
     i = 0
     if args.variance:
-        variance_plot(T, strategies, kwarg_list, orig_axs[str(i)])
+        variance_plot(T, strategies, kwarg_list, orig_axs[str(i)],
+                      points=args.plot_points, verbose=args.verbose)
         i += 1
     if args.coefficients:
-        coefficient_plot(T, strategies, kwarg_list, orig_axs[str(i)])
+        coefficient_plot(T, strategies, kwarg_list, orig_axs[str(i)],
+                         points=args.plot_points, verbose=args.verbose)
 
 
     # handles, labels = axs[0, 1].get_legend_handles_labels()
@@ -128,12 +164,12 @@ def main():
     h, l = orig_axs[str(0)].get_legend_handles_labels()
     k = int(np.log2(T))
     for i in range(num_plots):
-        orig_axs[str(i)].set_xticks([2**j for j in range(k-4*(k//4), k+1, k//4)])
+        orig_axs[str(i)].set_xticks([2**j for j in range(0, k+1, max(1, k//4))])
         try:
             orig_axs[str(i)].get_legend().remove()
         except AttributeError:
             pass
-    orig_axs["legend"].legend(h, l, ncol=3, loc='center', frameon=False, 
+    orig_axs["legend"].legend(h, l, ncol=3, loc='center', frameon=False,
                               fontsize=fontsize, borderpad=0.1, handlelength=1.5,
                               handletextpad=0.3,
                               borderaxespad=0)
@@ -141,7 +177,7 @@ def main():
     dpi = fig.dpi
     # legend_height = max(bbox_px.height, 360)
     # legend_width = bbox_px.width
-    # fig.set_size_inches(w = (num_plots * legend_height + legend_width + 50 ) / dpi, 
+    # fig.set_size_inches(w = (num_plots * legend_height + legend_width + 50 ) / dpi,
     #                     h= legend_height/dpi)
     width = 2.5 * (args.variance + args.coefficients)
     fig.set_size_inches(w=width, h=2.75)
@@ -149,26 +185,26 @@ def main():
 
 
 
-@cache
-def plotting_points(T):
-    steps = np.arange(1, T + 1)
-    scale = 6
-    view = np.arange(min(T, 2**scale))
-    i = 1
-    while T - 2**i > view[-1]:
-        next_chunk = np.arange(view[-1] + 2**i, min(T, 2**(i+scale)), 2**i)
-        view = np.concatenate((view, next_chunk), axis=None)
-        i += 1
-    return steps, view
+def plotting_points(T, points=100, mechanisms=()):
+    """One-based sample times, with memory independent of the horizon."""
+    if T < 1 or points < 2:
+        raise ValueError("T must be positive and points must be at least 2")
+    samples = np.rint(np.geomspace(1, T, min(T, points))).astype(np.int64)
+    required = [mechanism.required_plot_times(T) for mechanism in mechanisms]
+    if required:
+        samples = np.concatenate((samples, *required))
+    return np.unique(samples)
 
 
 
-def coefficient_plot(T, strategies, kwargs, ax, relative=False):
+def coefficient_plot(T, strategies, kwargs, ax, relative=False, points=100,
+                     verbose=False):
     ax.set_xscale('log', base=2)
     ax.set_xlabel("t", fontsize=8, labelpad=0)
-    steps, view = plotting_points(T)
+    times = plotting_points(T, points, strategies)
 
 
+    view = times - 1
     for strategy, kw in zip(strategies, kwargs):
         if isinstance(strategy, seq.Sequence):
             l = strategy.first_k_left(T)
@@ -176,8 +212,8 @@ def coefficient_plot(T, strategies, kwargs, ax, relative=False):
 
             if relative:
                 base = seq.Opt().first_k(T)
-                l /= base
-                r /= base
+                l = l / base
+                r = r / base
                 ax.set_yscale('linear')
                 # ax.set_title('Ratio')
                 ax.set_ylabel("Coefficient Ratio", fontsize=8, labelpad=0)
@@ -187,38 +223,37 @@ def coefficient_plot(T, strategies, kwargs, ax, relative=False):
                 ax.set_ylabel("Matrix Coefficients", fontsize=8, labelpad=0)
 
 
-            sns.lineplot(x=steps[view], y=r[view], ax=ax, **kw)
-            sns.lineplot(x=steps[view],
+            sns.lineplot(x=times, y=r[view], ax=ax, **kw)
+            sns.lineplot(x=times,
                          y=l[view],
                          ax=ax,
                          # label=strategy.name + " (L)",
                          # ls='-.',
                          color=kw['color'])
+            if verbose:
+                print(f"Plotted coefficients for {strategy.name} "
+                      f"({len(times)} points)", flush=True)
 
 
-def variance_plot(T, strategies, kwargs, ax):
+def variance_plot(T, strategies, kwargs, ax, points=100, verbose=False):
     ax.set_xscale('log', base=2)
     ax.set_xlabel("t", fontsize=fontsize, labelpad=0)
     ax.set_ylabel("Variance", fontsize=fontsize, labelpad=0)
     # ax.set_title('Mechanism Variance')
     # ax.set_title('Variance')
-    steps, view = plotting_points(T)
-
     for strategy, kw in zip(strategies, kwargs):
-        sns.lineplot(x=steps[view], y = (strategy.noise_schedule(T)**2)[view],
+        strategy_points = points
+        if isinstance(strategy, seq.Hybrid):
+            strategy_points *= HYBRID_PLOT_MULTIPLIER
+        times = plotting_points(T, strategy_points, [strategy])
+        started = perf_counter()
+        variances = strategy.variances_at(times)
+        sns.lineplot(x=times, y=variances,
                      ax=ax, **kw)
-
-
-
-
-
-
-
-
-
-
-
-
+        if verbose:
+            print(f"Plotted variance for {strategy.name} "
+                  f"({len(times)} points, {perf_counter() - started:.3f}s)",
+                  flush=True)
 
 
 
