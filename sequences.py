@@ -222,7 +222,7 @@ class Independent(Sequence):
 
 class Anytime(Sequence):
 
-    def __init__(self, alpha, gamma, N=mp.inf, delta=0, tol=0, asym_order=5):
+    def __init__(self, alpha, gamma, N=mp.inf, delta=0, tol=0, asym_order=5, inv_lap_degree=20):
         super().__init__()
 
         if mp.isnan(N) or N < 1 or (mp.isfinite(N) and int(N) != N):
@@ -239,6 +239,7 @@ class Anytime(Sequence):
                              or (alpha == -1 / 2 and gamma < -1 / 2)
                              or (alpha == -1 / 2 and gamma == -1 / 2
                                  and delta < -1 / 2))
+        self.inv_lap_degree = inv_lap_degree
 
         if gamma == 0 and delta == 0:
             self.name = "Sqrt decomposition"
@@ -317,13 +318,13 @@ class Anytime(Sequence):
             k = self.N
 
         if mp.isfinite(k):
-            if k < 2**10:
+            if k < 2**10: # low threshold here since sensitivity is computed only once
                 return np.linalg.norm(self.first_k(k))
             else:
                 return float(
                     mp.sqrt(
                         rs.partial_sum(k - 1, self.gamma, self.alpha,
-                                       self.delta)))
+                                       self.delta, degree=self.inv_lap_degree)))
         else:
             return float(
                 mp.sqrt(rs.full_norm_sq(self.gamma, self.alpha, self.delta)))
@@ -337,14 +338,14 @@ class Anytime(Sequence):
         if cumulative:
             return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
                                             2))).astype(float)
-        elif k <= 2**24:
+        elif k <= 2**20: # higher threshold here since SE is computed many times
             return np.sqrt(np.cumsum(np.pow(self.first_k_left(k),
                                             2))).astype(float)[-1]
         else:
             return np.sqrt(
                 float(
                     rs.partial_sum(k - 1, -self.gamma, -1 - self.alpha,
-                                   -self.delta)))
+                                   -self.delta, degree=self.inv_lap_degree)))
 
     def variances_at(self, times):
         """Estimate variance without materializing coefficients at large times."""
@@ -353,13 +354,15 @@ class Anytime(Sequence):
             return np.array([])
         unique, inverse = np.unique(times, return_inverse=True)
         left_sq = np.empty(unique.size)
-        small = unique <= 2**24
+        small = unique <= 2**20
         if np.any(small):
             prefix = np.cumsum(self.first_k_left(int(unique[small][-1]))**2)
             left_sq[small] = prefix[unique[small] - 1]
         for i in np.flatnonzero(~small):
+            print(f"\t{i}:\t{unique[i]}")
             left_sq[i] = float(rs.partial_sum(
-                int(unique[i]) - 1, -self.gamma, -1 - self.alpha, -self.delta))
+                int(unique[i]) - 1, -self.gamma, -1 - self.alpha, -self.delta,
+                degree=self.inv_lap_degree))
         return (self.sensitivity()**2 * left_sq)[inverse]
 
     @staticmethod
@@ -390,6 +393,8 @@ class Anytime(Sequence):
             at.name = rf"$\hat{{n}} = {_format_horizon(n_hat)}$"
             if mp.isfinite(N):
                 at.name += rf", $N = {_format_horizon(N)}$"
+            else:
+                at.name += r", $N = \infty$"
         return at
 
 

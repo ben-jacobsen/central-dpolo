@@ -8,7 +8,7 @@
 
 import cmath
 import math
-from functools import lru_cache
+from functools import cache, lru_cache
 
 import mpmath as mp
 import numpy as np
@@ -36,7 +36,8 @@ def _sqrt_damped_norm_sq(complement):
     return 2 * mp.elliprf(0, complement, 1) / mp.pi
 
 
-def full_norm_sq(gamma, alpha=-1 / 2, delta=0, tail_cutoff=2**10):
+@cache
+def full_norm_sq(gamma, alpha=-1 / 2, delta=0, tail_cutoff=2**10, prec=mp.mp.prec):
     """
     Compute the full, undamped squared l2 norm
 
@@ -210,7 +211,8 @@ def finite_upper_bound(N, r, gamma, alpha=-1 / 2, delta=0):
         r, gamma, alpha=alpha, delta=delta)
 
 
-def partial_sum(N, gamma, alpha=-1 / 2, delta=0, degree=None):
+@cache
+def partial_sum(N, gamma, alpha=-1 / 2, delta=0, degree=None, prec=mp.mp.prec):
     """
     Numerically recover the inclusive finite squared coefficient sum
 

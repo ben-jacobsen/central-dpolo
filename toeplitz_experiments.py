@@ -28,20 +28,26 @@ sns.set_context('paper')
 sns.set(rc={"lines.linewidth": 2.5, "figure.dpi": 160, "savefig.dpi": 160})
 sns.set(font_scale=0.85)
 
-fontsize = 8
-HYBRID_PLOT_MULTIPLIER = 4
+fontsize = 9
+HYBRID_PLOT_MULTIPLIER = 10
+COMPARISON_CHOICES = ('hybrid-ind', 'hybrid-toep', 'smooth-binary', 'opt')
+
+
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-T', default=2**16, type=int)
-    parser.add_argument('--N', type=float, default=np.inf,
-                        help='privacy horizon for Anytime (default: inf)')
-    parser.add_argument('--plot-points', type=int, default=100,
+    parser.add_argument('--N', type=parse_N, nargs='+', default=[np.inf],
+                        help='one or more privacy horizons for Anytime (default: inf)')
+    parser.add_argument('--plot-points', type=int, default=25,
                         help='maximum number of logarithmically spaced plot points')
     parser.add_argument('--n-hats', default=[2**12], type=int, nargs='*')
     parser.add_argument('--gammas', default=[], type=float, nargs='*')
     parser.add_argument('--deltas', default=[0], type=float, nargs='*')
+    parser.add_argument('--compare', nargs='*', choices=COMPARISON_CHOICES,
+                        default=[],
+                        help='built-in mechanisms to include in the comparison')
     parser.add_argument('--no-cache', action="store_true")
     parser.add_argument('--tol', type=float, default=0)
     parser.add_argument('--coefficients', action="store_true")
@@ -55,62 +61,19 @@ def main():
         parser.error('T must be positive and --plot-points must be at least 2')
     if not args.variance and not args.coefficients:
         parser.error('select --variance and/or --coefficients')
-    N = args.N
-    if np.isnan(N) or N < T or (np.isfinite(N) and not N.is_integer()):
-        parser.error('N must be an integer at least T, or inf')
-    N = int(N) if np.isfinite(N) else np.inf
-    if any(n < 1 or n > N for n in args.n_hats):
-        parser.error('each n-hat must be positive and no greater than N')
+    Ns = []
+    for N in args.N:
+        if np.isnan(N) or (np.isfinite(N) and not N.is_integer()):
+            parser.error('each N must be an integer or inf')
+        Ns.append(int(N) if np.isfinite(N) else np.inf)
+    if any(n < 1 or any(n > N for N in Ns) for n in args.n_hats):
+        parser.error('each n-hat must be positive and no greater than every N')
     sa.config['cache'] = not args.no_cache
 
     if not args.no_cache and not os.path.isdir('seq_cache'):
         os.mkdir('seq_cache')
 
-    strategies = []
-
-    def add_strategy(strategy, started=None):
-        if started is None:
-            started = perf_counter()
-        strategies.append(strategy)
-        if args.verbose:
-            print(f"Added strategy {strategy.name} ({perf_counter() - started:.3f}s)",
-                  flush=True)
-    # strategies.append(seq.Hybrid(
-    #     at= seq.Anytime(-1/2, -0.55, delta=0),
-    #     w=0.25, init_chunk=2, exponential=False))
-    add_strategy(seq.Hybrid(
-        at= seq.Independent(),
-        w=0.25, init_chunk=2, exponential=False))
-    # strategies.append(seq.Anytime(-1/2, -0.51, delta=0,
-                                  # tol=1e-4, asym_order=6))
-    for gamma in args.gammas:
-        for delta in args.deltas:
-            add_strategy(
-                seq.Anytime(-1 / 2,
-                            gamma,
-                            N=N,
-                            delta=delta,
-                            tol=args.tol,
-                            asym_order=4))
-
-    for n_hat in args.n_hats:
-        started = perf_counter()
-        strategy = seq.Anytime.init_optimized(
-            n_hat, N=N, cache=not args.no_cache,
-            kwargs={'tol': args.tol, 'asym_order': 4})
-        add_strategy(strategy, started=started)
-    # strategies.append(seq.BinaryMechanism(T))
-    # strategies.append(seq.Hybrid(
-    #     at= seq.Anytime(-1/2, -0.55, delta=0),
-    #     bounded = seq.SmoothBinary(2),
-    #     w=0.25, init_chunk=2, exponential=False))
-    add_strategy(seq.SmoothBinary(T))
-    # strategies.append(seq.DoublingTrick(100, T, exponential=True))
-
-    # Opt always goes last
-    baseline = seq.Opt(N=T)
-    # baseline.name = f"Sqrt decomposition (N={T})"
-    add_strategy(baseline)
+    strategies = build_strategies(T, Ns, args)
 
 
     num_plots = args.variance + args.coefficients
@@ -169,7 +132,7 @@ def main():
             orig_axs[str(i)].get_legend().remove()
         except AttributeError:
             pass
-    orig_axs["legend"].legend(h, l, ncol=3, loc='center', frameon=False,
+    orig_axs["legend"].legend(h, l, ncol=1 + num_plots, loc='center', frameon=False,
                               fontsize=fontsize, borderpad=0.1, handlelength=1.5,
                               handletextpad=0.3,
                               borderaxespad=0)
@@ -179,13 +142,71 @@ def main():
     # legend_width = bbox_px.width
     # fig.set_size_inches(w = (num_plots * legend_height + legend_width + 50 ) / dpi,
     #                     h= legend_height/dpi)
-    width = 2.5 * (args.variance + args.coefficients)
-    fig.set_size_inches(w=width, h=2.75)
+    width = 1 + 2.5 * (args.variance + args.coefficients)
+    fig.set_size_inches(w=width, h=3)
     plt.show()
 
+def parse_N(value):
+    """Parse a finite horizon or an explicit infinity spelling for argparse."""
+    if value.strip().lower() in {'inf', 'infinity'}:
+        return np.inf
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid horizon {value!r}; use an integer, 'inf', or 'infinity'") from exc
 
 
-def plotting_points(T, points=100, mechanisms=()):
+def build_strategies(T, Ns, args):
+    """Construct the mechanisms used by the standard comparison plots."""
+    strategies = []
+
+    def add_strategy(strategy, started=None):
+        if started is None:
+            started = perf_counter()
+        strategies.append(strategy)
+        if args.verbose:
+            print(f"Added strategy {strategy.name} ({perf_counter() - started:.3f}s)",
+                  flush=True)
+
+    if 'hybrid-ind' in args.compare:
+        add_strategy(seq.Hybrid(
+            at= seq.Independent(),
+            w=0.25, init_chunk=2, exponential=False))
+
+    if 'hybrid-toep' in args.compare:
+        add_strategy(seq.Hybrid(
+            at = seq.Anytime.init_optimized(n_hat=20),
+            w=0.25, init_chunk=2, exponential=False))
+    # Construct horizon-dependent Anytime strategies for each requested N.
+    for N in Ns:
+        for gamma in args.gammas:
+            for delta in args.deltas:
+                add_strategy(
+                    seq.Anytime(-1 / 2,
+                                gamma,
+                                N=N,
+                                delta=delta,
+                                tol=args.tol,
+                                asym_order=4))
+
+        for n_hat in args.n_hats:
+            started = perf_counter()
+            strategy = seq.Anytime.init_optimized(
+                n_hat, N=N, cache=not args.no_cache,
+                kwargs={'tol': args.tol, 'asym_order': 4})
+            add_strategy(strategy, started=started)
+    if 'smooth-binary' in args.compare:
+        add_strategy(seq.SmoothBinary(T))
+    # strategies.append(seq.DoublingTrick(100, T, exponential=True))
+
+    if 'opt' in args.compare:
+        baseline = seq.Opt(N=T)
+        # baseline.name = f"Sqrt decomposition (N={T})"
+        add_strategy(baseline)
+    return strategies
+
+def plotting_points(T, points=25, mechanisms=()):
     """One-based sample times, with memory independent of the horizon."""
     if T < 1 or points < 2:
         raise ValueError("T must be positive and points must be at least 2")
@@ -196,22 +217,29 @@ def plotting_points(T, points=100, mechanisms=()):
     return np.unique(samples)
 
 
+def strategy_plot_horizon(T, strategy):
+    """Return the portion of the requested plot supported by ``strategy``."""
+    horizon = getattr(strategy, 'N', mp.inf)
+    if mp.isfinite(horizon):
+        return min(T, int(horizon))
+    return T
 
-def coefficient_plot(T, strategies, kwargs, ax, relative=False, points=100,
+
+
+def coefficient_plot(T, strategies, kwargs, ax, relative=False, points=25,
                      verbose=False):
     ax.set_xscale('log', base=2)
     ax.set_xlabel("t", fontsize=8, labelpad=0)
-    times = plotting_points(T, points, strategies)
-
-
-    view = times - 1
     for strategy, kw in zip(strategies, kwargs):
         if isinstance(strategy, seq.Sequence):
-            l = strategy.first_k_left(T)
-            r = strategy.first_k(T)
+            strategy_T = strategy_plot_horizon(T, strategy)
+            times = plotting_points(strategy_T, points, [strategy])
+            view = times - 1
+            l = strategy.first_k_left(strategy_T)
+            r = strategy.first_k(strategy_T)
 
             if relative:
-                base = seq.Opt().first_k(T)
+                base = seq.Opt().first_k(strategy_T)
                 l = l / base
                 r = r / base
                 ax.set_yscale('linear')
@@ -235,7 +263,7 @@ def coefficient_plot(T, strategies, kwargs, ax, relative=False, points=100,
                       f"({len(times)} points)", flush=True)
 
 
-def variance_plot(T, strategies, kwargs, ax, points=100, verbose=False):
+def variance_plot(T, strategies, kwargs, ax, points=25, verbose=False):
     ax.set_xscale('log', base=2)
     ax.set_xlabel("t", fontsize=fontsize, labelpad=0)
     ax.set_ylabel("Variance", fontsize=fontsize, labelpad=0)
@@ -245,7 +273,8 @@ def variance_plot(T, strategies, kwargs, ax, points=100, verbose=False):
         strategy_points = points
         if isinstance(strategy, seq.Hybrid):
             strategy_points *= HYBRID_PLOT_MULTIPLIER
-        times = plotting_points(T, strategy_points, [strategy])
+        strategy_T = strategy_plot_horizon(T, strategy)
+        times = plotting_points(strategy_T, strategy_points, [strategy])
         started = perf_counter()
         variances = strategy.variances_at(times)
         sns.lineplot(x=times, y=variances,

@@ -269,6 +269,7 @@ def _truncated_convolution(left, right, length):
     return prefix
 
 
+@cache
 def poly_coeffs(n, alpha=-1 / 2):
     """
     Returns the first n+1 coefficients in the Taylor expansion of
@@ -546,31 +547,24 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
     """
     if delta == 0:
         log_powers = np.array([np.pow(np.log(ns), -k) for k in ks])
-        coeffs = np.pow(-1, ks) * binom(
-            gamma, ks) * mp.gamma(-alpha) * rgamma_derivatives(max(ks), alpha)
+        coeffs = (np.pow(-1, ks) * binom(gamma, ks) *
+                  float(mp.gamma(-alpha)) *
+                  np.asarray(rgamma_derivatives(max(ks), alpha),
+                             dtype=float))
         return coeffs @ log_powers
     else:
-        ind_part = mp.gamma(-alpha) * rgamma_derivatives(max(ks), alpha)
+        ind_part = (float(mp.gamma(-alpha)) *
+                    np.asarray(rgamma_derivatives(max(ks), alpha),
+                               dtype=float))
         log_powers = np.array(
             [np.power(np.log(ns) * np.log(np.log(ns)), -k) for k in ks])
 
         if delta == int(delta):
             raise ValueError("delta must not be in the set 1,2,3,...")
 
-        u = sym.Symbol('u')
-        x = sym.Symbol('x')
-
-        # The singular expansion has the factor
-        # 1 + log(1 - x*u) / x (see correction.tex, Eq. (theorem derivation)).
-        # The opposite sign produces systematically incorrect delta terms.
-        f = (1 - x * u)**gamma * (1 + (1 / x) * sym.log(1 - x * u))**delta
-
-        funcs = [
-            sym.lambdify([x, u],
-                         sym.diff(f, u, k) / factorial(k)) for k in ks
-        ]
-
-        eks = [fk(np.log(np.log(ns)), 0) for fk in funcs]
+        x_values = np.log(np.log(ns))
+        funcs = [_expansion_function(int(k)) for k in ks]
+        eks = [fk(x_values, gamma, delta) for fk in funcs]
 
         # [fk.evalf(subs={
         # u: 0,
@@ -581,6 +575,22 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
         log_powers *= eks
 
         return ind_part @ log_powers
+
+
+_ASYM_U = sym.Symbol('u')
+_ASYM_X = sym.Symbol('x')
+_ASYM_GAMMA = sym.Symbol('gamma')
+_ASYM_DELTA = sym.Symbol('delta')
+
+
+@cache
+def _expansion_function(k):
+    """Return a cached numerical evaluator for the kth delta correction."""
+    base = ((1 - _ASYM_X * _ASYM_U)**_ASYM_GAMMA *
+            (1 + sym.log(1 - _ASYM_X * _ASYM_U) / _ASYM_X)**_ASYM_DELTA)
+    expression = sym.diff(base, _ASYM_U, k).subs(_ASYM_U, 0) / factorial(k)
+    return sym.lambdify((_ASYM_X, _ASYM_GAMMA, _ASYM_DELTA), expression,
+                        modules='numpy')
 
 
 @cache
