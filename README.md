@@ -24,12 +24,24 @@ This command generates a plot visualizing the relative error of different orders
 pipenv run python3 singular_approximation.py -T $((2**20)) -K 6  --gamma -0.51 --deltas 0 0.51 --relative
 ```
 
-### Generate Comparison Plots
+### Visualize Parameter Optimization Plots
 
-This command generates a plot comparing the variance of different private continual counting algorithms as a function of time (Figure 2 in the paper). As above, use `--no-cache` to avoid saving intermediate results.
+The following commands generate variance plots for numerically optimized parameters with various estimated input sizes \hat n and maximum time horizons N (Figures 2a and 2b in the paper).
 
 ```bash
-pipenv run python3 toeplitz_experiments.py --variance --coefficients --gammas -0.51 --deltas 0 0.51 0.612 -T $((2**24))
+python3 toeplitz_experiments.py --variance -T $((2**32)) --n-hats $((2**16)) $((2**24)) $((2**32)) $((2**40)) --N inf
+```
+
+```bash
+python3 toeplitz_experiments.py --variance -T $((2**32)) --n-hats $((2**16)) --N $((2**16)) $((2**24)) $((2**32)) inf
+```
+
+### Generate Comparison Plots
+
+This command generates a plot comparing the variance of different private continual counting algorithms as a function of time (Figure 3 in the paper). As above, use `--no-cache` to avoid saving intermediate results.
+
+```bash
+python3 toeplitz_experiments.py --variance -T $((2**32)) --n-hats $((2**20)) --verbose --N $((2**40)) inf --compare hybrid-ind hybrid-toep smooth-binary opt --coefficients
 ```
 
 ## Main Components
@@ -44,5 +56,7 @@ pipenv run python3 toeplitz_experiments.py --variance --coefficients --gammas -0
 - `Hybrid`: A meta-algorithm by Chan et al. that combines an unbounded mechanism (`Anytime` or `Independent`) with any asymptotically-optimal bounded mechanism (like `Opt`) to create an algorithm that's both unbounded and asymptotically optimal, at the cost of constant factor increase in error. 
 
 `singular_approximation.py` - Contains numerical methods for computing the Taylor coefficients of the functions used by our algorithm.
+
+`radial_sensitivity.py` - Contains numerical methods for computing or bounding the sensitivity of our matrix factorizations, as well as an algorithm for numerically optimizing parameters.
 
 `toeplitz_experiments` - Main script for generating plots comparing different counting algorithms.

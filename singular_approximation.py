@@ -27,12 +27,99 @@ from scipy.optimize import minimize_scalar
 from scipy.signal import convolve, fftconvolve
 from scipy.special import binom
 
+# FLINT uses a single worker by default.  Series exponentiation is one of the
+# more expensive operations in this module, so use the CPUs available to the
+# process unless the caller supplies an explicit override.
+try:
+    _available_cpus = len(os.sched_getaffinity(0))
+except AttributeError:
+    _available_cpus = os.cpu_count() or 1
+_flint_threads = int(os.environ.get("FLINT_THREADS", _available_cpus))
+if _flint_threads < 1:
+    raise ValueError("FLINT_THREADS must be a positive integer")
+flint.ctx.threads = _flint_threads
+
 config = {'cache': True}
-matplotlib.use("qtagg")
 sns.set_style("darkgrid")
 sns.set_context('paper')
 sns.set(rc={"lines.linewidth": 3, "figure.dpi": 160, "savefig.dpi": 160})
 sns.set(font_scale=0.7)
+
+
+def _cached_prefix(prefix, n, parameter):
+    """Load the smallest cached prefix covering coefficients through ``n``."""
+    cache_dir = "seq_cache"
+    parameter_text = str(parameter)
+    suffix = f"_{parameter_text}.npy"
+    candidates = []
+    try:
+        names = os.listdir(cache_dir)
+    except FileNotFoundError:
+        return None
+
+    for name in names:
+        if not (name.startswith(f"{prefix}_") and name.endswith(suffix)):
+            continue
+        length_text = name[len(prefix) + 1:-len(suffix)]
+        try:
+            cached_n = int(length_text)
+        except ValueError:
+            continue
+        if cached_n >= n:
+            candidates.append((cached_n, name))
+
+    if not candidates:
+        return None
+    _, name = min(candidates)
+    with open(os.path.join(cache_dir, name), 'rb') as stream:
+        return np.load(stream)[:n + 1]
+
+
+def _cached_length(prefix, parameters):
+    """Return the largest cached coefficient index for a parameter tuple."""
+    suffix = "_" + "_".join(str(parameter) for parameter in parameters) + ".npy"
+    try:
+        names = os.listdir("seq_cache")
+    except FileNotFoundError:
+        return 0
+
+    largest = 0
+    for name in names:
+        if not (name.startswith(f"{prefix}_") and name.endswith(suffix)):
+            continue
+        length_text = name[len(prefix) + 1:-len(suffix)]
+        try:
+            largest = max(largest, int(length_text) + 1)
+        except ValueError:
+            continue
+    return largest
+
+
+def _cached_prefix_multi(prefix, n, parameters):
+    """Load the smallest cached prefix covering ``n`` for multiple parameters."""
+    suffix = "_" + "_".join(str(parameter) for parameter in parameters) + ".npy"
+    candidates = []
+    try:
+        names = os.listdir("seq_cache")
+    except FileNotFoundError:
+        return None
+
+    for name in names:
+        if not (name.startswith(f"{prefix}_") and name.endswith(suffix)):
+            continue
+        length_text = name[len(prefix) + 1:-len(suffix)]
+        try:
+            cached_n = int(length_text)
+        except ValueError:
+            continue
+        if cached_n >= n:
+            candidates.append((cached_n, name))
+
+    if not candidates:
+        return None
+    _, name = min(candidates)
+    with open(os.path.join("seq_cache", name), 'rb') as stream:
+        return np.load(stream)[:n + 1]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -97,7 +184,7 @@ def main():
     ax.set_xlim((10, T))
     ax.set_xscale('log', base=2)
     # plt.grid()
-    ax.legend(ncol=2, loc='lower left', framealpha=0.6, handlelength=1.5, columnspacing=1, labelspacing=0.25, fontsize=8)
+    ax.legend(ncol=2, loc='upper right', framealpha=0.6, handlelength=1.5, columnspacing=1, labelspacing=0.25, fontsize=8)
     ax.set_xlabel("t", fontsize=8, labelpad=0)
     ax.set_ylabel("Relative Error", fontsize=8, labelpad=0)
     fig.set_size_inches(w=2.5, h=2)
@@ -124,16 +211,62 @@ def exact_convolution(T, gamma, alpha=-1 / 2, delta=0):
     if isinstance(T, np.ndarray):
         T = len(T)
 
+    if config['cache']:
+        os.makedirs("seq_cache", exist_ok=True)
+    name = f"sequence_{T - 1}_{alpha}_{gamma}_{delta}.npy"
+    if config['cache']:
+        try:
+            with open(os.path.join("seq_cache", name), 'rb') as stream:
+                return np.load(stream)[:T]
+        except FileNotFoundError:
+            cached = _cached_prefix_multi(
+                "sequence", T - 1, (alpha, gamma, delta))
+            if cached is not None:
+                return cached
+
     poly_part = poly_coeffs(T - 1, alpha)
     log_part = log_coeffs(T - 1, gamma)
 
     if delta == 0:
-        return convolve(poly_part, log_part, mode='full')[:T]
+        result = _truncated_convolution(poly_part, log_part, T)
     else:
         loglog_part = loglog_coeffs(T - 1, delta)
-        return convolve(convolve(poly_part, log_part, mode='full')[:T],
-                        loglog_part,
-                        mode='full')[:T]
+        first_product = _truncated_convolution(poly_part, log_part, T)
+        result = _truncated_convolution(first_product, loglog_part, T)
+
+    if config['cache']:
+        os.makedirs("seq_cache", exist_ok=True)
+        with open(os.path.join("seq_cache", name), 'wb') as stream:
+            np.save(stream, result)
+    return result
+
+
+def cached_convolution_prefix(gamma, alpha=-1 / 2, delta=0):
+    """Return the largest exact-convolution prefix currently cached."""
+    if not config['cache']:
+        return 0
+
+    final = _cached_length("sequence", (alpha, gamma, delta))
+    component_limits = [_cached_length("poly", (alpha,))]
+    if gamma != 1:
+        component_limits.append(_cached_length("log", (gamma,)))
+    if delta != 0:
+        component_limits.append(_cached_length("loglog", (delta,)))
+    return max(final, min(component_limits))
+
+
+def _truncated_convolution(left, right, length):
+    """Return the first ``length`` terms of a linear convolution.
+
+    SciPy's full convolution result is a view when sliced, so returning a
+    slice directly would keep the complete ``len(left) + len(right) - 1``
+    array alive.  Copying the requested prefix lets the full temporary be
+    released before another large convolution is started.
+    """
+    full = convolve(left, right, mode='full')
+    prefix = np.array(full[:length], copy=True)
+    del full
+    return prefix
 
 
 @cache
@@ -142,18 +275,35 @@ def poly_coeffs(n, alpha=-1 / 2):
     Returns the first n+1 coefficients in the Taylor expansion of
         f(x) = (1-x)^alpha
     """
-    return np.array([poly_coeff_single(k, alpha) for k in range(n + 1)])
+    name = f"poly_{n}_{alpha}.npy"
+    if config['cache']:
+        try:
+            with open(os.path.join("seq_cache", name), 'rb') as stream:
+                return np.load(stream)[:n + 1]
+        except FileNotFoundError:
+            cached = _cached_prefix("poly", n, alpha)
+            if cached is not None:
+                return cached
+
+    coefficients = np.empty(n + 1, dtype=float)
+    coefficients[0] = 1.0
+    for k in range(1, n + 1):
+        coefficients[k] = coefficients[k - 1] * (1 - (1 + alpha) / k)
+    if config['cache']:
+        with open(os.path.join("seq_cache", name), 'wb') as stream:
+            np.save(stream, coefficients)
+    return coefficients
 
 
-@cache
 def poly_coeff_single(n, alpha=-1 / 2):
     """
-    Recursively computes the coefficient of x^n in the Taylor expansion of
+    Computes the coefficient of x^n in the Taylor expansion of
         f(x) = (1-x)^alpha
     """
-    if n == 0:
-        return 1
-    return (1 - (1 + alpha) / n) * poly_coeff_single(n - 1, alpha)
+    coefficient = 1.0
+    for k in range(1, n + 1):
+        coefficient *= 1 - (1 + alpha) / k
+    return coefficient
 
 
 def log_coeffs(n, gamma=1):
@@ -166,9 +316,11 @@ def log_coeffs(n, gamma=1):
         if config['cache']:
             try:
                 with open(os.path.join("seq_cache", name), 'rb') as f:
-                    return np.load(f)
+                    return np.load(f)[:n + 1]
             except FileNotFoundError:
-                pass
+                cached = _cached_prefix("log", n, gamma)
+                if cached is not None:
+                    return cached
 
         # a = power_coeffs_explicit(1 / np.arange(1, n + 2), gamma)
         a = power_coeffs_implicit(1 / np.arange(1, n + 2), gamma)
@@ -200,9 +352,11 @@ def loglog_coeffs(n, delta=1):
     if config['cache']:
         try:
             with open(os.path.join("seq_cache", name), 'rb') as f:
-                return np.load(f)
+                return np.load(f)[:n + 1]
         except FileNotFoundError:
-            pass
+            cached = _cached_prefix("loglog", n, delta)
+            if cached is not None:
+                return cached
     if delta == 1:
         f_coeffs = log_coeffs(n + 1)
         f_prime_coeffs = f_coeffs[1:] * np.arange(1, n + 2)
@@ -279,11 +433,18 @@ def power_coeffs_implicit(a_coeffs, p):
         Computes and returns the first n+1 Taylor coefficients of f(x)^p
             using the definition f(x)^p = exp(p log(f(x))) 
     """
-    a_coeffs = a_coeffs.tolist()
-    flint.ctx.cap = len(a_coeffs)
+    # python-flint 0.6 accepts a Python list here.  Release the NumPy source
+    # array before constructing the Arb series so both representations do not
+    # remain live throughout the expensive power operation.
+    coeff_list = np.asarray(a_coeffs).tolist()
+    del a_coeffs
+    flint.ctx.cap = len(coeff_list)
     # TODO: might be interesting to track precision
-    return np.array(
-        flint.arb_series(a_coeffs).__pow__(p).coeffs()).astype(float)
+    series = flint.arb_series(coeff_list)
+    del coeff_list
+    result = series.__pow__(p)
+    del series
+    return np.array(result.coeffs()).astype(float)
 
 
 def l(x):
@@ -386,28 +547,24 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
     """
     if delta == 0:
         log_powers = np.array([np.pow(np.log(ns), -k) for k in ks])
-        coeffs = np.pow(-1, ks) * binom(
-            gamma, ks) * mp.gamma(-alpha) * rgamma_derivatives(max(ks), alpha)
+        coeffs = (np.pow(-1, ks) * binom(gamma, ks) *
+                  float(mp.gamma(-alpha)) *
+                  np.asarray(rgamma_derivatives(max(ks), alpha),
+                             dtype=float))
         return coeffs @ log_powers
     else:
-        ind_part = mp.gamma(-alpha) * rgamma_derivatives(max(ks), alpha)
+        ind_part = (float(mp.gamma(-alpha)) *
+                    np.asarray(rgamma_derivatives(max(ks), alpha),
+                               dtype=float))
         log_powers = np.array(
             [np.power(np.log(ns) * np.log(np.log(ns)), -k) for k in ks])
 
         if delta == int(delta):
             raise ValueError("delta must not be in the set 1,2,3,...")
 
-        u = sym.Symbol('u')
-        x = sym.Symbol('x')
-
-        f = (1 - x * u)**gamma * (1 - (1 / x) * sym.log(1 - x * u))**delta
-
-        funcs = [
-            sym.lambdify([x, u],
-                         sym.diff(f, u, k) / factorial(k)) for k in ks
-        ]
-
-        eks = [fk(np.log(np.log(ns)), 0) for fk in funcs]
+        x_values = np.log(np.log(ns))
+        funcs = [_expansion_function(int(k)) for k in ks]
+        eks = [fk(x_values, gamma, delta) for fk in funcs]
 
         # [fk.evalf(subs={
         # u: 0,
@@ -418,6 +575,22 @@ def expansion_coeff(gamma, ks, ns, alpha=-1 / 2, delta=0):
         log_powers *= eks
 
         return ind_part @ log_powers
+
+
+_ASYM_U = sym.Symbol('u')
+_ASYM_X = sym.Symbol('x')
+_ASYM_GAMMA = sym.Symbol('gamma')
+_ASYM_DELTA = sym.Symbol('delta')
+
+
+@cache
+def _expansion_function(k):
+    """Return a cached numerical evaluator for the kth delta correction."""
+    base = ((1 - _ASYM_X * _ASYM_U)**_ASYM_GAMMA *
+            (1 + sym.log(1 - _ASYM_X * _ASYM_U) / _ASYM_X)**_ASYM_DELTA)
+    expression = sym.diff(base, _ASYM_U, k).subs(_ASYM_U, 0) / factorial(k)
+    return sym.lambdify((_ASYM_X, _ASYM_GAMMA, _ASYM_DELTA), expression,
+                        modules='numpy')
 
 
 @cache
@@ -465,107 +638,6 @@ def combined_estimate(T, gamma, alpha=-1 / 2, delta=0, tol=1e-2):
         coeff[:t + 1] = manual
         return coeff
 
-
-def f1(w):
-    """
-    Contribution of the polynomial part
-    """
-    return (2 * mp.cos(w))**2
-
-
-def f2(w):
-    """
-    Contribution of the logarithmic part
-    """
-    return (1 / 4) * mp.log(f1(w))**2 + w**2
-
-
-def f3(w):
-    """
-    (first) contribution of the iterated logarithmic part
-    """
-    return (1 / 4) * mp.log(f2(w))**2
-
-
-def f4(w):
-    """
-    (second) contribution of the iterated logarithmic part
-    """
-    # if w >= mp.pi / 2:
-    #     return 0
-    return (mp.atan2(w, -mp.log(2 * mp.cos(w))) +
-            mp.atan2(-mp.sin(2 * w), -mp.cos(2 * w)))**2
-
-
-def sens_function(alpha, gamma, delta):
-    """
-    Using Parseval's theorem, we can evaluate the infinite sum 
-    corresponding to the squared Taylor coefficients of our singular function
-    by integration. This returns the integrand for the interval 0 to pi/2. 
-    """
-    # TODO: check for constant factor error with change of variables
-    return lambda w: 2 / np.pi * f1(w)**alpha * f2(w)**gamma * (4 * (f3(
-        w) + f4(w)))**delta
-
-
-@cache
-def compute_sensitivity(alpha, gamma, delta):
-    """
-    Actually integrate the function from above
-    """
-    return np.sqrt(
-        mp.quad(sens_function(alpha, gamma, delta), [0, mp.pi / 3, mp.pi / 2]))
-
-
-@cache
-def compute_sensitivity_direct(alpha, gamma, delta):
-    """
-    Unsimplified version, for reference. Seems to be less numerically stable,
-    esp. when delta is large.
-    """
-    return np.sqrt(
-        mp.quad(
-            lambda z: mp.fabs(
-                singular_function(
-                    mp.exp(1j * z), gamma, alpha=alpha, delta=delta))**2 /
-            (2 * mp.pi), [-mp.pi, 0, mp.pi]))
-
-
-def optimize_variance(T, alpha, gamma):
-    """
-    What is the optimal value of delta for fixed alpha, gamma, *and* T?
-    """
-    return minimize_scalar(
-        lambda delta: float(compute_sensitivity(alpha, gamma, delta)) * np.
-        sqrt(np.sum(
-            exact_convolution(T, -gamma, alpha=alpha, delta=-delta)**2)),
-        bounds=(-1, 1))
-    # (full_computation(
-    #     T * 2, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**
-    #  2 / full_computation(
-    #      T, -gamma, K=4, alpha=alpha, delta=-delta, single_coeff=True)**2)[
-    #          0],
-
-
-def optimize_sensitivity(alpha, gamma):
-    """
-    What is the optimal value of delta for fixed alpha and gamma?
-    """
-
-    def weight(w):
-        return mp.log(f3(w) + f4(w))
-
-    def g1(delta):
-        return mp.quad(
-            lambda w: sens_function(alpha, gamma, delta)(w) * weight(w),
-            [0, mp.pi / 3])
-
-    def g2(delta):
-        return mp.quad(
-            lambda w: sens_function(alpha, gamma, delta)(w) * weight(w),
-            [mp.pi / 3, mp.pi / 2])
-
-    return mp.findroot(lambda delta: g1(delta) + g2(delta), 0, verbose=True)
 
 
 if __name__ == "__main__":
