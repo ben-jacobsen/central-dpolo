@@ -184,7 +184,7 @@ def main():
     ax.set_xlim((10, T))
     ax.set_xscale('log', base=2)
     # plt.grid()
-    ax.legend(ncol=2, loc='lower left', framealpha=0.6, handlelength=1.5, columnspacing=1, labelspacing=0.25, fontsize=8)
+    ax.legend(ncol=2, loc='upper right', framealpha=0.6, handlelength=1.5, columnspacing=1, labelspacing=0.25, fontsize=8)
     ax.set_xlabel("t", fontsize=8, labelpad=0)
     ax.set_ylabel("Relative Error", fontsize=8, labelpad=0)
     fig.set_size_inches(w=2.5, h=2)

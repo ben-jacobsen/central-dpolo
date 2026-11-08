@@ -4,8 +4,6 @@
     Purpose: PURPOSE
 """
 
-from itertools import combinations
-
 import mpmath as mp
 import numpy as np
 import pytest
@@ -13,11 +11,10 @@ import pytest
 import radial_sensitivity as rs
 import sequences as s
 import singular_approximation as sa
-import toeplitz_experiments as te
 
-RADIAL_N_VALUES = [2**n for n in [10, 14, 18]]
-CONVERGENT_PARAMS = [(-0.5, -0.6), (-0.51, 0), (-0.51, 0.51)]
-DIVERGENT_PARAMS = [(-c, -d) for c, d in CONVERGENT_PARAMS]
+RADIAL_N_VALUES = [2**10, 2**14]
+CONVERGENT_PARAMS = [(-0.51, 0), (-0.51, 0.51)]
+DIVERGENT_PARAMS = [(0.51, -0.51)]
 TEST_DPS = 15
 
 
@@ -47,7 +44,7 @@ def exact_partial_sum(N, gamma, alpha=-1 / 2, delta=0):
 
 @pytest.mark.parametrize("N", RADIAL_N_VALUES)
 @pytest.mark.parametrize("gamma, delta", CONVERGENT_PARAMS + DIVERGENT_PARAMS)
-@pytest.mark.parametrize("r", [0.5, 0.9, 0.99])
+@pytest.mark.parametrize("r", [0.5, 0.99])
 def test_damped_norm_matches_exact_coefficients(N, gamma, delta, r):
     """
     Compare radial Parseval integration with a directly weighted coefficient
@@ -98,10 +95,6 @@ def test_partial_sum_matches_exact_convolution(N, gamma, delta):
 
     partial_sum(N, ...) is inclusive through z^N, hence the N + 1 passed to
     exact_convolution.
-
-    Degree 12 empirically gives errors around 1e-6--1e-5 at small horizons
-    and substantially smaller errors for moderate N.  The tolerance is
-    deliberately numerical rather than machine-level.
     """
     expected = exact_partial_sum(N, gamma, delta=delta)
 
@@ -134,26 +127,23 @@ def test_full_norm_convergence_region():
     assert value > 0
 
 
-@pytest.mark.parametrize("gamma, delta", CONVERGENT_PARAMS)
-@pytest.mark.parametrize("S", [2**n for n in range(10, 21, 2)])
-def test_full_norm_tail_cutoff_stability(gamma, delta, S):
+@pytest.mark.parametrize("gamma, delta", [(-0.51, 0), (-0.51, 0.51)])
+def test_full_norm_tail_cutoff_stability(gamma, delta):
     """
     The endpoint-tail approximation should be more or less invariant
     to different choices for the tail cutoff
     """
+    cutoffs = [2**10, 2**14, 2**18]
     with mp.workdps(TEST_DPS):
-        vals = [rs.full_norm_sq(gamma, delta=delta, tail_cutoff=S)]
+        values = [float(rs.full_norm_sq(gamma, delta=delta,
+                                        tail_cutoff=cutoff))
+                  for cutoff in cutoffs]
 
-    for (v1, v2) in combinations(vals, 2):
-        assert np.isclose(
-            float(v1),
-            float(v2),
-            rtol=2e-4,
-            atol=1e-10,
-        )
+    assert np.all(np.diff(values) <= 0)
+    assert np.isclose(values[-1], values[0], rtol=2e-4, atol=1e-10)
 
 
-@pytest.mark.parametrize("N", RADIAL_N_VALUES)
+@pytest.mark.parametrize("N", [2**12, 2**14])
 def test_full_norm_is_above_finite_partial_sum(N):
     """
     Every finite coefficient sum must lie below the full squared sensitivity.

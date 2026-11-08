@@ -28,7 +28,7 @@ sns.set_context('paper')
 sns.set(rc={"lines.linewidth": 2.5, "figure.dpi": 160, "savefig.dpi": 160})
 sns.set(font_scale=0.85)
 
-fontsize = 9
+fontsize = 8.5
 HYBRID_PLOT_MULTIPLIER = 10
 COMPARISON_CHOICES = ('hybrid-ind', 'hybrid-toep', 'smooth-binary', 'opt')
 
@@ -229,31 +229,30 @@ def strategy_plot_horizon(T, strategy):
 def coefficient_plot(T, strategies, kwargs, ax, relative=False, points=25,
                      verbose=False):
     ax.set_xscale('log', base=2)
-    ax.set_xlabel("t", fontsize=8, labelpad=0)
+    ax.set_xlabel("t", fontsize=fontsize, labelpad=0)
     for strategy, kw in zip(strategies, kwargs):
         if isinstance(strategy, seq.Sequence):
             strategy_T = strategy_plot_horizon(T, strategy)
             times = plotting_points(strategy_T, points, [strategy])
-            view = times - 1
-            l = strategy.first_k_left(strategy_T)
-            r = strategy.first_k(strategy_T)
+            l = strategy.left_coefficients_at(times)
+            r = strategy.coefficients_at(times)
 
             if relative:
-                base = seq.Opt().first_k(strategy_T)
+                base = seq.Opt().coefficients_at(times)
                 l = l / base
                 r = r / base
                 ax.set_yscale('linear')
                 # ax.set_title('Ratio')
-                ax.set_ylabel("Coefficient Ratio", fontsize=8, labelpad=0)
+                ax.set_ylabel("Coefficient Ratio", fontsize=fontsize, labelpad=0)
             else:
                 ax.set_yscale('log', base=2)
                 # ax.set_title('Matrix Coefficients')
-                ax.set_ylabel("Matrix Coefficients", fontsize=8, labelpad=0)
+                ax.set_ylabel("Matrix Coefficients", fontsize=fontsize, labelpad=0)
 
 
-            sns.lineplot(x=times, y=r[view], ax=ax, **kw)
+            sns.lineplot(x=times, y=r, ax=ax, **kw)
             sns.lineplot(x=times,
-                         y=l[view],
+                         y=l,
                          ax=ax,
                          # label=strategy.name + " (L)",
                          # ls='-.',
@@ -267,6 +266,7 @@ def variance_plot(T, strategies, kwargs, ax, points=25, verbose=False):
     ax.set_xscale('log', base=2)
     ax.set_xlabel("t", fontsize=fontsize, labelpad=0)
     ax.set_ylabel("Variance", fontsize=fontsize, labelpad=0)
+    ax.tick_params(labelsize=fontsize)
     # ax.set_title('Mechanism Variance')
     # ax.set_title('Variance')
     for strategy, kw in zip(strategies, kwargs):

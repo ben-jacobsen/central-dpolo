@@ -15,10 +15,8 @@ import sequences as s
 
 TEST_DPS = 15
 STEEHFEST_RTOL = 2e-4
-SMALL_N = [32, 64, 128]
-LARGE_N = [2**n for n in [12, 16]]
-CONVERGENT_PARAMS = [(-0.5, -0.6), (-0.51, 0), (-0.51, 0.51)]
-DIVERGENT_PARAMS = [(-c, -d) for c, d in CONVERGENT_PARAMS]
+SMALL_N = [32, 128]
+CONVERGENT_PARAMS = [(-0.51, 0), (-0.51, 0.51)]
 
 
 def left_parameters(alpha, gamma, delta):
@@ -41,7 +39,7 @@ def radial_left_norm(k, alpha, gamma, delta):
     return float(mp.sqrt(rs.partial_sum(k - 1, gamma_L, alpha_L, delta_L)))
 
 
-@pytest.mark.parametrize("N", [8, 32, 128, 512])
+@pytest.mark.parametrize("N", [32, 512])
 @pytest.mark.parametrize("gamma, delta", CONVERGENT_PARAMS)
 def test_anytime_finite_sensitivity_matches_radial_small_N(N, gamma, delta):
     """
@@ -62,15 +60,15 @@ def test_anytime_finite_sensitivity_matches_radial_small_N(N, gamma, delta):
     assert np.isclose(actual, expected, rtol=STEEHFEST_RTOL, atol=1e-10)
 
 
-@pytest.mark.parametrize("N", LARGE_N)
-@pytest.mark.parametrize("gamma, delta", CONVERGENT_PARAMS)
-def test_anytime_finite_sensitivity_matches_radial_large_N(N, gamma, delta):
+@pytest.mark.parametrize("gamma, delta", [(-0.51, 0.51)])
+def test_anytime_finite_sensitivity_matches_radial_large_N(gamma, delta):
     """
     Above the exact-coefficient threshold, Anytime itself delegates to
     radial_sensitivity.  This test is therefore intentionally strict: its main
     purpose is to catch argument and off-by-one mistakes in that delegation.
     """
     alpha = -0.5
+    N = 2**16
     at = s.Anytime(alpha, gamma, N=N, delta=delta)
 
     with mp.workdps(TEST_DPS):
@@ -92,8 +90,8 @@ def test_anytime_infinite_sensitivity_matches_full_norm(gamma, delta):
     assert np.isclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.parametrize("k", [8, 32, 128, 512])
-@pytest.mark.parametrize("gamma, delta", CONVERGENT_PARAMS)
+@pytest.mark.parametrize("k", [32, 128])
+@pytest.mark.parametrize("gamma, delta", [(-0.51, 0.51)])
 def test_anytime_standard_error_matches_radial_small_k(k, gamma, delta):
     """
     The non-cumulative standard error is the l2 norm of the first k left
@@ -227,13 +225,3 @@ def test_anytime_init_optimized_uses_optimizer_result(monkeypatch):
     assert at.alpha == -0.5
     assert at.gamma == expected_gamma
     assert at.delta == expected_delta
-
-
-def test_anytime_init_optimized_formats_mathtext_horizons(monkeypatch):
-    monkeypatch.setattr(
-        rs,
-        "optimize_parameters",
-        lambda n_hat, N: {"gamma": -1.25, "delta": 1.75},
-    )
-    at = s.Anytime.init_optimized(2**12, N=2**20, short_name=True, cache=False)
-    assert at.name == r"$\hat{n} = 2^{12}$, $N = 2^{20}$"

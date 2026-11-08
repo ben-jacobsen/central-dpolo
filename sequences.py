@@ -124,6 +124,24 @@ class Sequence(Mechanism):
         """
         raise NotImplementedError
 
+    def coefficients_at(self, times):
+        """Return right-sequence coefficients at selected times."""
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        unique, inverse = np.unique(times, return_inverse=True)
+        coefficients = self.first_k(int(unique[-1]))[unique - 1]
+        return coefficients[inverse]
+
+    def left_coefficients_at(self, times):
+        """Return left-sequence coefficients at selected times."""
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        unique, inverse = np.unique(times, return_inverse=True)
+        coefficients = self.first_k_left(int(unique[-1]))[unique - 1]
+        return coefficients[inverse]
+
     def sensitivity(self, k=None):
         """
         Returns the l2 norm of the right sequence, for the purpose of
@@ -201,7 +219,7 @@ class Independent(Sequence):
 
     def __init__(self):
         super().__init__()
-        self.name = "Independent noise"
+        self.name = "Ind. noise"
 
     def first_k(self, k):
         if k > self.size:
@@ -242,7 +260,7 @@ class Anytime(Sequence):
         self.inv_lap_degree = inv_lap_degree
 
         if gamma == 0 and delta == 0:
-            self.name = "Sqrt decomposition"
+            self.name = "Sqrt Matrix"
         else:
             self.name = f"γ={gamma:.2f}"
             if delta != 0:
@@ -266,6 +284,49 @@ class Anytime(Sequence):
             self._left_seq = np.cumsum(fast_inv_ltt(self._seq))
 
         return self._left_seq[:k]
+
+    def _asymptotic_coefficients_at(self, times, gamma, alpha, delta):
+        """Evaluate asymptotic coefficients without materializing a prefix."""
+        return np.array([
+            sa.full_computation(
+                int(time), gamma=gamma, alpha=alpha, delta=delta,
+                K=self.asym_order, single_coeff=True)[0]
+            for time in times
+        ])
+
+    def coefficients_at(self, times):
+        """Return sparse right coefficients, using asymptotics at large times."""
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        unique, inverse = np.unique(times, return_inverse=True)
+        cutoff = 2**20
+        values = np.empty(unique.size, dtype=float)
+        small = unique <= cutoff
+        if np.any(small):
+            exact = self.first_k(int(unique[small][-1]))
+            values[small] = exact[unique[small] - 1]
+        if np.any(~small):
+            values[~small] = self._asymptotic_coefficients_at(
+                unique[~small], self.gamma, self.alpha, self.delta)
+        return values[inverse]
+
+    def left_coefficients_at(self, times):
+        """Return sparse left coefficients, using asymptotics at large times."""
+        times = self._validate_times(times)
+        if not times.size:
+            return np.array([])
+        unique, inverse = np.unique(times, return_inverse=True)
+        cutoff = 2**20
+        values = np.empty(unique.size, dtype=float)
+        small = unique <= cutoff
+        if np.any(small):
+            exact = self.first_k_left(int(unique[small][-1]))
+            values[small] = exact[unique[small] - 1]
+        if np.any(~small):
+            values[~small] = self._asymptotic_coefficients_at(
+                unique[~small], -self.gamma, -1 - self.alpha, -self.delta)
+        return values[inverse]
 
     def _grow(self, newsize):
         if newsize > self.N:
