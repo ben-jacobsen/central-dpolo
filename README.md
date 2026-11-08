@@ -41,7 +41,7 @@ python3 toeplitz_experiments.py --variance -T $((2**32)) --n-hats $((2**16)) --N
 This command generates a plot comparing the variance of different private continual counting algorithms as a function of time (Figure 3 in the paper). As above, use `--no-cache` to avoid saving intermediate results.
 
 ```bash
-pipenv run python3 toeplitz_experiments.py --variance --coefficients --gammas -0.51 --deltas 0 0.51 0.612 -T $((2**24))
+python3 toeplitz_experiments.py --variance -T $((2**32)) --n-hats $((2**20)) --verbose --N $((2**40)) inf --compare hybrid-ind hybrid-toep smooth-binary opt --coefficients
 ```
 
 ## Main Components
